@@ -158,6 +158,7 @@ END
                                        "ILLL", #silo id, id in silo, last updated time, created time
                                        0,
                                        $max_file_size );
+
     my $transaction_index_silo = $cls->open_silo( "$dir/transaction_index_silo",
                                                    "IL", #state, time
                                                    0,
@@ -247,15 +248,21 @@ sub __up_idx {
 
     my $max_file_size = $self->[MAX_FILE_SIZE];
 
-    my $old_index = $self->index_silo;
+    my $old_index = $self->open_silo( "$dir/index_silo",
+                                       "ILL", #silo id, id in silo, last updated time
+                                       0,
+                                       $max_file_size );
     my $new_index = $self->open_silo( "$dir/index_silo_new",
                                       "ILLL", #silo id, id in silo, last updated time, creation time
                                       0,
                                       $max_file_size );
     
     my $count = $self->record_count;
+print STDERR "$count things\n";
+    $new_index->ensure_entry_count( $count );
     for my $id (1..$count) {
         my( $silo_id, $id_in_silo, $update_time ) = @{$old_index->get_record($id)};
+#        print STDERR "$silo_id, $id_in_silo, $update_time\n";
         $new_index->put_record( $id, [$silo_id,$id_in_silo,$update_time,$update_time] );
     }
     rename "$dir/index_silo", "$dir/index_silo_aside";

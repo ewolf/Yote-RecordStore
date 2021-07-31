@@ -170,7 +170,7 @@ sub put_record {
     my( $self, $id, $data, $template, $offset ) = @_;
 
     if( $id > $self->entry_count || $id < 1 ) {
-        die "Yote::RecordStore::File::Silo->put_record : index $id out of bounds for silo $self->[DIRECTORY]. Store has entry count of ".$self->entry_count;
+        die "Yote::RecordStore::File::Silo->put_record : index $id out of bounds for silo $self->[DIRECTORY]. Silo has entry count of ".$self->entry_count;
     }
     if( ! $template ) {
         $template = $self->[TEMPLATE];
