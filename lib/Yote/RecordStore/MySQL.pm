@@ -129,19 +129,9 @@ sub open_store {
     return $store;
 } #open_store
 
-=head2 close_store()
-
-
-
-=cut
-
-sub close_recordstore {
-    #noop
-}
-
 =head2 checkerr()
 
-
+Mysql only for debugging
 
 =cut
 

@@ -11,10 +11,6 @@ sub open_store {
     
 }
 
-sub close_store {
-    
-}
-
 sub root_id {
 
 }
