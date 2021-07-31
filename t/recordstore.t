@@ -38,6 +38,7 @@ test_use();
 test_init();
 test_locks();
 test_sillystrings();
+test_meta();
 
 api->test_failed_async( $factory );
 #api->test_transaction_async( $factory );
@@ -809,6 +810,24 @@ sub test_sillystrings {
 
 } #test_sillystrings
 
+
+sub test_meta {
+    my $dir = tempdir( CLEANUP => 1 );
+    my $store = Yote::RecordStore::File->open_store( directory => $dir );
+    my $id = $store->stow( "THISISATEST" );
+
+    my ($upd, $cr ) = $store->fetch_meta( $id );
+    ok ($upd > 0, 'has a last updated time' );
+    ok ($cr > 0, 'has a created time' );
+    $store->stow( "BLLBLBBL", $id );
+
+    my ($upd2, $cr2 ) = $store->fetch_meta( $id );
+
+    ok ($upd2 > $upd, 'updated time is greater' );
+    is ($cr2, $cr, 'created time did not change' );
+    
+    
+}
 
 package Factory;
 

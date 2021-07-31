@@ -40,9 +40,10 @@ use warnings;
 no warnings 'numeric';
 no warnings 'uninitialized';
 
+use Data::Dumper;
 use Fcntl qw( :flock SEEK_SET );
 use File::Path qw(make_path);
-use Data::Dumper;
+use Time::HiRes qw(time);
 use YAML;
 
 use Yote::RecordStore::File::Silo;
@@ -154,7 +155,7 @@ END
     }
 
     my $index_silo = $cls->open_silo( "$dir/index_silo",
-                                       "ILL", #silo id, id in silo, last updated time
+                                       "ILLL", #silo id, id in silo, last updated time, created time
                                        0,
                                        $max_file_size );
     my $transaction_index_silo = $cls->open_silo( "$dir/transaction_index_silo",
@@ -212,17 +213,54 @@ sub fetch {
         return undef;
     }
 
-    my( $silo_id, $id_in_silo ) = @{$self->[INDEX_SILO]->get_record($id)};
+    my( $silo_id, $id_in_silo, $update_time, $creation_time ) = @{$self->[INDEX_SILO]->get_record($id)};
     if( $silo_id ) {
         my $ret = $self->[SILOS]->[$silo_id]->get_record( $id_in_silo );
         $self->_unlock;
 #        print STDERR "FETCH $id ($silo_id/$id_in_silo) : ".substr( $ret->[3], 0, $ret->[2] > 100 ? 100 : $ret->[2] )."\n";
-        return undef, undef, substr( $ret->[3], 0, $ret->[2] );
+        return $update_time, $creation_time, substr( $ret->[3], 0, $ret->[2] );
     }
 #    print STDERR "FETCH $id (NULL)\n";
     $self->_unlock;
     return undef;
 } #fetch
+
+sub fetch_meta {
+    my( $self, $id ) = @_;
+
+    $self->_read_lock;
+
+    if( $id > $self->entry_count ) {
+        return undef;
+    }
+
+    my( $silo_id, $id_in_silo, $update_time, $creation_time ) = @{$self->[INDEX_SILO]->get_record($id)};
+    $self->_unlock;
+    return $update_time, $creation_time;
+} #fetch_meta
+
+sub __up_idx {
+    # a one off? add the creation time to the index?
+    my $self = shift;
+
+    my $dir = $self->[DIRECTORY];
+
+    my $max_file_size = $self->[MAX_FILE_SIZE];
+
+    my $old_index = $self->index_silo;
+    my $new_index = $self->open_silo( "$dir/index_silo_new",
+                                      "ILLL", #silo id, id in silo, last updated time, creation time
+                                      0,
+                                      $max_file_size );
+    
+    my $count = $self->record_count;
+    for my $id (1..$count) {
+        my( $silo_id, $id_in_silo, $update_time ) = @{$old_index->get_record($id)};
+        $new_index->put_record( $id, [$silo_id,$id_in_silo,$update_time,$update_time] );
+    }
+    rename "$dir/index_silo", "$dir/index_silo_aside";
+    rename "$dir/index_silo_new", "$dir/index_silo";
+}
 
 sub stow {
     my $self = $_[0];
@@ -240,9 +278,9 @@ sub stow {
     if( defined $id && $id < 1 ) {
         die "The id must be a supplied as a positive integer";
     }
-    my( $old_silo_id, $old_id_in_silo );
+    my( $old_silo_id, $old_id_in_silo, $old_creation_time );
     if( $id > 0 ) {
-        ( $old_silo_id, $old_id_in_silo ) = @{$index->get_record($id)};
+        ( $old_silo_id, $old_id_in_silo, undef, $old_creation_time ) = @{$index->get_record($id)};
     }
     else {
         $id = $index->next_id;
@@ -255,8 +293,8 @@ sub stow {
     my $new_id_in_silo = $new_silo->push( [RS_ACTIVE, $id, $data_write_size, $_[1]] );
 
 #    print STDERR "WRITE $id ($new_silo_id/$new_id_in_silo) --> ".substr($_[1],0,100)."\n";
-
-    $index->put_record( $id, [$new_silo_id,$new_id_in_silo,time] );
+    my $t = int(time * 1000);
+    $index->put_record( $id, [$new_silo_id,$new_id_in_silo, $t, $old_creation_time || $t] );
 
     if( $old_silo_id ) {
         $self->_vacate( $old_silo_id, $old_id_in_silo );
@@ -289,7 +327,8 @@ sub delete_record {
         return undef;
     }
     my( $old_silo_id, $old_id_in_silo ) = @{$self->[INDEX_SILO]->get_record($del_id)};
-    $self->[INDEX_SILO]->put_record( $del_id, [0,0,time] );
+    my $t = int(time * 1000);
+    $self->[INDEX_SILO]->put_record( $del_id, [0,0,$t,$t] );
 
     if( $old_silo_id ) {
         $self->_vacate( $old_silo_id, $old_id_in_silo );
@@ -370,7 +409,7 @@ sub use_transaction {return;
         return $self->[TRANSACTION];
     }
     $self->_write_lock;
-    my $tid = $self->[TRANSACTION_INDEX_SILO]->push( [TR_ACTIVE, time] );
+    my $tid = $self->[TRANSACTION_INDEX_SILO]->push( [TR_ACTIVE, int(time * 1000)] );
     $self->_unlock;
     my $tdir = "$self->[DIRECTORY]/transactions/$tid";
     make_path( $tdir, { error => \my $err } );
@@ -492,6 +531,7 @@ sub _vacate {
             my( $state, $id ) = (@{$silo->get_record( $rc, 'IL' )});
             if( $state == RS_ACTIVE ) {
                 $silo->copy_record($rc,$id_to_empty);
+                # the following does not update the time field, it preserves it
                 $self->[INDEX_SILO]->put_record( $id, [$silo_id,$id_to_empty], "IL" );
                 $silo->pop;
                 return;
