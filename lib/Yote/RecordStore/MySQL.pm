@@ -157,7 +157,7 @@ sub get_record_count {
     return $count;
 }
 
-sub root_id {
+sub first_id {
     my $self = shift;
     if (! $self->fetch(1)) {
         $self->next_id;
