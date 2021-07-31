@@ -96,14 +96,14 @@ sub close_recordstore {
     #noop
 }
 
-sub root_id {
+sub first_id {
     my $self = shift;
     my $root = $self->{root}->find_one();
     if ($root) {
         return $root->{id};
     }
-    my $root_id = $self->next_id;
-    $root = { id => $root_id };
+    my $first_id = $self->next_id;
+    $root = { id => $first_id };
     $self->{root}->insert_one( $root );
     return $root->{id};
 }
@@ -209,16 +209,6 @@ sub rollback_transaction {
 } #rollback_transaction
 
 =head2 detect_version()
-
-
-
-=cut
-
-sub detect_version {
-
-} #detect_version
-
-
 
 "I became Iggy because I had a sadistic boss at a record store. I'd been in a band called the Iguanas. And when this boss wanted to embarrass and demean me, he'd say, 'Iggy, get me a coffee, light.' - Iggy Pop";
 

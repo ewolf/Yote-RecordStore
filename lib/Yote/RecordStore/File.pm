@@ -264,7 +264,7 @@ sub next_id {
     return shift->[INDEX_SILO]->next_id;
 } #next_id
 
-sub root_id {
+sub first_id {
     return 1;
 }
 

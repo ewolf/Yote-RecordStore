@@ -11,11 +11,11 @@ sub open_store {
     
 }
 
-sub root_id {
+sub first_id {
 
 }
 
-sub get_record_count {
+sub next_id {
 
 }
 
@@ -27,19 +27,15 @@ sub stow {
 
 }
 
-sub show_locks {
-
-}
-
-sub connection_id {
-
-}
-
-sub next_id {
-
-}
-
 sub delete_record {
+
+}
+
+sub get_record_count {
+
+}
+
+sub show_locks {
 
 }
 
@@ -62,10 +58,5 @@ sub commit_transaction {
 sub rollback_transaction {
 
 }
-
-sub detect_version {
-
-}
-
 
 1;
