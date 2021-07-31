@@ -1,5 +1,7 @@
 package Yote::RecordStore;
 
+# TODO - perldoc explaining method signatures and methods
+
 #
 # Base class for RecordStore implementations.
 #

@@ -7,6 +7,8 @@ package Yote::RecordStore::File;
 #      - remove die, replace with return values
 #      - read/write locking
 #      - testing
+#      - consider changing fetch return value to omit updated and created 
+#        times
 
 #######################################################################
 # The RecordStore is an index-value store that is composed of fixed   #
