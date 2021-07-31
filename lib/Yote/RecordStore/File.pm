@@ -95,17 +95,17 @@ use constant {
 sub open_store {
     my( $cls, @options ) = @_;
     if( @options == 1 ) {
-        unshift @options, 'BASE_PATH';
+        unshift @options, 'directory';
     }
     my( %options ) = @options;
-    my $dir = $options{BASE_PATH};
+    my $dir = $options{directory};
     unless( -d $dir ) {
         _make_path( $dir, 'base' );
     }
-    my $max_file_size = $options{MAX_FILE_SIZE};
+    my $max_file_size = $options{max_file_size};
     $max_file_size = $Yote::RecordStore::File::Silo::DEFAULT_MAX_FILE_SIZE unless $max_file_size;
     
-    my $min_file_size = $options{MIN_FILE_SIZE};
+    my $min_file_size = $options{min_file_size};
     $min_file_size = $Yote::RecordStore::File::Silo::DEFAULT_MIN_FILE_SIZE unless $min_file_size;
     if( $min_file_size > $max_file_size ) {
         die "MIN_FILE_SIZE cannot be more than MAX_FILE_SIZE";
@@ -153,22 +153,22 @@ END
         close $vers_fh;
     }
 
-    my $index_silo = Yote::RecordStore::File::Silo->open_silo( "$dir/index_silo",
-                                                         "ILL", #silo id, id in silo, last updated time
-                                                         0,
-                                                         $max_file_size );
-    my $transaction_index_silo = Yote::RecordStore::File::Silo->open_silo( "$dir/transaction_index_silo",
-                                                                     "IL", #state, time
-                                                                     0,
-                                                                     $max_file_size );
+    my $index_silo = $cls->open_silo( "$dir/index_silo",
+                                       "ILL", #silo id, id in silo, last updated time
+                                       0,
+                                       $max_file_size );
+    my $transaction_index_silo = $cls->open_silo( "$dir/transaction_index_silo",
+                                                   "IL", #state, time
+                                                   0,
+                                                   $max_file_size );
 
     my $silos = [];
 
     for my $silo_id ($min_silo_id..$max_silo_id) {
-        $silos->[$silo_id] = Yote::RecordStore::File::Silo->open_silo( "$silo_dir/$silo_id",
-                                                                 'ILLa*',  # status, id, data-length, data
-                                                                 2 ** $silo_id,
-                                                                 $max_file_size );
+        $silos->[$silo_id] = $cls->open_silo( "$silo_dir/$silo_id",
+                                               'ILLa*',  # status, id, data-length, data
+                                               2 ** $silo_id,
+                                               $max_file_size );
     }
     my $header = pack( 'ILL', 1,2,3 );
     my $header_size = do { use bytes; length( $header ) };
@@ -184,13 +184,17 @@ END
         undef,
         $header_size, # the ILL from ILLa*
         $lock_fh,
-        [],
+        {},
         $max_silo_id,
     ], $cls;
     $store->_fix_transactions;
     flock( $lock_fh, LOCK_UN );
     return $store;
 } #open_store
+
+sub directory {
+    shift->[DIRECTORY];
+}
 
 sub fetch {
     my( $self, $id, $no_trans ) = @_;
@@ -298,12 +302,17 @@ sub delete_record {
 sub lock {
     my( $self, @locknames ) = @_;
 
-    my( %previously_locked ) = ( map { $_ => 1 } @{$self->[LOCKS]} );
+    unless( @locknames) {
+        # lock the whole store
+        push @locknames, "__STORE__";
+    }
 
-    if( @{$self->[LOCKS]} && grep { ! $previously_locked{$_} } @locknames ) {
+    my( %previously_locked ) = ( map { $_ => 1 } keys %{$self->[LOCKS]} );
+
+    if( scalar(keys %{$self->[LOCKS]}) && grep { ! $self->[LOCKS]{$_} } @locknames ) {
         die "Yote::RecordStore::File->lock cannot be called twice in a row without unlocking between";
     }
-    my $fhs = [];
+    my $fhs = {};
 
     my $failed;
 
@@ -327,13 +336,13 @@ sub lock {
             $fh->autoflush(1);
             print $fh '';
         }
-        push @$fhs, $fh;
+        $fhs->{$name} = $fh;
     }
 
     if( $failed ) {
         # it must be able to lock all the locks or it fails
         # if it failed, unlock any locks it managed to get
-        for my $fh (@$fhs) {
+        for my $fh (values %$fhs) {
             flock( $fh, LOCK_UN );
         }
         die "Yote::RecordStore::File->lock : lock failed";
@@ -348,10 +357,10 @@ sub unlock {
     my $self = shift;
     my $fhs = $self->[LOCKS];
 
-    for my $fh (@$fhs) {
+    for my $fh (values %$fhs) {
         flock( $fh, LOCK_UN );
     }
-    @$fhs = ();
+    %$fhs = ();
 } #unlock
 
 sub use_transaction {return;
@@ -509,6 +518,14 @@ sub silo_id_for_size {
     return $silo_id;
 } #silo_id_for_size
 
+sub open_silo {
+    my ($self, $silo_file, $template, $size, $max_file_size ) = @_;
+    return Yote::RecordStore::File::Silo->open_silo( $silo_file,
+                                                     $template,
+                                                     $size,
+                                                     $max_file_size );
+}
+
 # ---------------------- private stuffs -------------------------
 
 sub _make_path {
@@ -631,11 +648,11 @@ Options
 
 =over 2
 
-=item BASE_PATH
+=item directory
 
-=item MIN_FILE_SIZE - default is 4096
+=item min_file_size - default is 4096
 
-=item MAX_FILE_SIZE - default is 2 gigs
+=item max_file_size - default is 2 gigs
 
 =head2 reopen_store( directory )
 

@@ -626,7 +626,7 @@ sub test_failed_async {
         $provider->stow( 'Data::ObjectStore::Hash|1568050706.05789|1568050706.0579 0`29`0',55 );
         $forker->put( '122' );
         $forker->expect( '123' );
-        $provider->stow( 'Data::ObjectStore::Hash|1568050706.06183|1568050706.06185 0`29`1`BASE_PATH`v/opt/yote/data_store',84 );
+        $provider->stow( 'Data::ObjectStore::Hash|1568050706.06183|1568050706.06185 0`29`1`directory`v/opt/yote/data_store',84 );
         $forker->put( '124' );
         $forker->expect( '125' );
         $provider->stow( 'Data::ObjectStore::Hash|1568050706.05427|1568050706.05429 0`29`0',25 );
@@ -940,7 +940,7 @@ sub test_failed_async {
         $provider->stow( 'Data::ObjectStore::Hash|1568050706.0566|1568050706.05661 0`29`0',44 );
         $forker->put( '127' );
         $forker->expect( '128' );
-        $provider->stow( 'Data::ObjectStore::Hash|1568050706.06106|1568050706.06109 0`29`1`BASE_PATH`v/opt/yote/data_store',82 );
+        $provider->stow( 'Data::ObjectStore::Hash|1568050706.06106|1568050706.06109 0`29`1`directory`v/opt/yote/data_store',82 );
         $forker->put( '129' );
         $forker->expect( '130' );
         $provider->stow( 'Data::ObjectStore::Hash|1568050706.06013|1568050706.0604 0`29`1`PUBLIC`r76',74 );
@@ -1324,7 +1324,7 @@ sub test_failed_async {
         $provider->stow( 'Data::ObjectStore::Hash|1568050706.25904|1568050706.26207 0`29`2`DOMAINS`r92`DATA-STORE`r104',91 );
         $provider->stow( 'Data::ObjectStore::Hash|1568050706.2607|1568050706.26131 0`29`2`MAIN-APP-CLASS`vYote::App::PageCounter`APP-METHODS`r100',99 );
         $provider->stow( 'Data::ObjectStore::Hash|1568050706.25945|1568050706.26156 0`29`2`APPS`r94`OPTIONS`r103',93 );
-        $provider->stow( 'Data::ObjectStore::Hash|1568050706.26201|1568050706.26205 0`29`1`BASE_PATH`v/opt/yote/data_store',105 );
+        $provider->stow( 'Data::ObjectStore::Hash|1568050706.26201|1568050706.26205 0`29`1`directory`v/opt/yote/data_store',105 );
         $provider->stow( 'Data::ObjectStore::Hash|1568050706.2609|1568050706.26131 0`29`1`Yote::App::PageCounter`r101',100 );
         $provider->stow( 'Data::ObjectStore::Hash|1568050706.05476|1568050706.25745 0`29`3`update_counter`v1`fetch`v1`update`v1',29 );
         $provider->stow( 'Data::ObjectStore::Hash|1568050706.26006|1568050706.26052 0`29`1`Yote::App::PageCounter`r97',96 );
