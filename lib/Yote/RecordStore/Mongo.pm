@@ -210,6 +210,8 @@ sub rollback_transaction {
 
 =head2 detect_version()
 
+=cut
+
 "I became Iggy because I had a sadistic boss at a record store. I'd been in a band called the Iguanas. And when this boss wanted to embarrass and demean me, he'd say, 'Iggy, get me a coffee, light.' - Iggy Pop";
 
 
