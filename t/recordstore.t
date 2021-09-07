@@ -1508,7 +1508,8 @@ sub test_locking {
         my $store = Yote::RecordStore->open_store( $dir );
         $forker->put( 'A STORE' );
         usleep (5000);
-        my $canlock = $store->can_lock('','A') ? 'A CAN LOCK': 'A CANNOT LOCK';
+        my $canlock = $store->can_lock ? 'A CAN LOCK': 'A CANNOT LOCK';
+        $canlock .= Yote::RecordStore->can_lock( $store->[$store->DIRECTORY] ) ? '': ' DID NOT WORK AGAIN';
         $store->lock;
         $forker->put( $canlock );
         usleep( 15000 );
@@ -1529,7 +1530,7 @@ sub test_locking {
         $forker->spush('C STORE');
 
         $forker->expect( 'A CAN LOCK', 'B' );
-        my $canlock = $store->can_lock('','B') ? 'B CAN LOCK': 'B CANNOT LOCK';
+        my $canlock = $store->can_lock ? 'B CAN LOCK': 'B CANNOT LOCK';
         $store->lock;
         $forker->spush ("A TO UNLOCK");
         $forker->put ($canlock);
@@ -1553,7 +1554,7 @@ sub test_locking {
                        'A TO UNLOCK', 
                        'A UNLOCKED' );
         $forker->expect('B CANNOT LOCK', 'C' );
-        my $canlock = $store->can_lock('','C') ? 'C CAN LOCK': 'C CANNOT LOCK';
+        my $canlock = $store->can_lock ? 'C CAN LOCK': 'C CANNOT LOCK';
         $store->lock;
 
         $forker->put ($canlock);

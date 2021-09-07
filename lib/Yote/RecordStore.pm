@@ -250,16 +250,20 @@ sub can_lock {
         my $lock_fh = $pkg->[LOCK_FH] = _openhandle($pkg->[LOCK_FH]);
         unless ($lock_fh) {
             my $lockfile = $pkg->[LOCK_FILE];
+say STDERR "zOLOCK $lockfile";
             $lock_fh = _open( $lockfile, '+<' );
         }
         my $res = _flock( $lock_fh, LOCK_EX | LOCK_NB );
+        $res && _flock( $lock_fh, LOCK_UN );
         return $res;
     }
 
     my $lockfile = "$dir/LOCK";
     my $lock_fh = _open( $lockfile, '+<' );
 
-    return _flock( $lock_fh, LOCK_EX | LOCK_NB );        
+    my $r = _flock( $lock_fh, LOCK_EX | LOCK_NB );        
+    $r && _flock( $lock_fh, LOCK_UN );
+    return $r;
 }
 
 sub lock {
