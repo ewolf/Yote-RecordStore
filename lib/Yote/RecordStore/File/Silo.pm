@@ -37,7 +37,6 @@ use Fcntl qw( SEEK_SET );
 use File::Path qw(make_path);
 
 use IO::Handle;
-use YAML;
 
 use vars qw($VERSION);
 $VERSION = '6.00';
@@ -82,17 +81,8 @@ sub open_silo {
     }
 
     unless( -e "$dir/0" ) {
-        open my $out, '>', "$dir/config.yaml";
-        print $out <<"END";
-VERSION: $VERSION
-TEMPLATE: $template
-RECORD_SIZE: $record_size
-MAX_FILE_SIZE: $max_file_size
-END
-        close $out;
-        
         # must have at least an empty silo file
-        open $out, '>', "$dir/0";
+        open my $out, '>', "$dir/0";
         print $out '';
         close $out;
     }
@@ -106,16 +96,6 @@ END
         int($max_file_size / $record_size),
         ], $class;
 } #open_silo
-
-sub reopen_silo {
-    my( $cls, $dir ) = @_;
-    my $cfgfile = "$dir/config.yaml";
-    if( -e $cfgfile ) {
-        my $cfg = YAML::LoadFile( $cfgfile );
-        return $cls->open_silo( $dir, @$cfg{qw(TEMPLATE RECORD_SIZE MAX_FILE_SIZE)} );
-    }
-    die "could not find silo in $dir";
-} #reopen_silo
 
 sub next_id {
     my( $self ) = @_;

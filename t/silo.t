@@ -69,9 +69,6 @@ sub test_init {
     $silo = Yote::RecordStore::File::Silo->open_silo( $dir, 'LLL' );
     is( $silo->template, 'LLL', 'given template matches' );
 
-    $silo = Yote::RecordStore::File::Silo->reopen_silo( $dir );
-    is( $silo->template, 'LLL', 'given template matches for reopened silo' );
-    
     is( $silo->max_file_size, 2_000_000_000, "silo is default max size" );
     is( $silo->record_size, 12, "silo has 32 bytes per record" );
     is( $silo->records_per_subsilo, 166_666_666, "166,666,666 records per file" );
@@ -192,7 +189,7 @@ sub test_use {
         };
         like( $@, qr/can't open/, 'error msg for dark dir' );
         chmod 0777, "$dir";
-        is_deeply( [$silo->subsilos], [ 0, 1,2,3], "still four subsilos after reopen" );
+        is_deeply( [$silo->subsilos], [ 0, 1,2,3], "still four subsilos after open" );
 
         chmod 0444, "$dir/3";
         eval {
@@ -255,7 +252,6 @@ sub test_use {
         is_deeply( [$silo->subsilos], [], "no subsilos after unlink silo" );
         fail( 'was able to call subsilos on this destroyed silo' );
     };
-
 
     $dir = tempdir( CLEANUP => 1 );
     $size = 2 ** 10;
@@ -342,6 +338,12 @@ sub test_use {
 
     is_deeply( $silo->get_record(2), ['SOMETHING EXCELLENT'], 'copy worked for new id' );
     is_deeply( $silo->get_record(1), ['SOMETHING EXCELLENT'], 'original still there' );
+
+    $size = 2 ** 10;
+    $silo = Yote::RecordStore::File::Silo->open_silo( $dir, 'Z*', $size, $size * 10, );
+    is ($silo->push( "WRONG".('x'x$size) ), undef, 'push record too big' );
+    like( $@, qr/too large/, 'error message for too big data push' );
+
 } #test_use
 
 sub test_async {

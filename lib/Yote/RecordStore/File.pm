@@ -138,13 +138,13 @@ sub open_store {
     my $lock_dir  = "$dir/user_locks";
     my $trans_dir = "$dir/transactions";
     
-    open $lock_fh, -e $lockfile ? '+<' : '>', $lockfile;
+    $lock_fh = _open (-e $lockfile ? '+<' : '>', $lockfile);
     unless ($lock_fh) {
-        $@ = "Error opening lockfile '$lockfile' : @$ $!";
+        $@ = "Error opening lockfile '$lockfile' : $@ $!";
         return undef;
     }
 
-    flock( $lock_fh, LOCK_EX );
+    _flock( $lock_fh, LOCK_EX );
     $lock_fh->autoflush(1);
     print $lock_fh "LOCK\n";
         
@@ -170,23 +170,23 @@ sub open_store {
     _make_path( $lock_dir, 'lock' ) or return undef;
     _make_path( $trans_dir, 'transaction' ) or return undef;
 
-    my $index_silo = Yote::RecordStore::File::Silo->open_silo( "$dir/index_silo",
-                                                               "ILQQ"); #silo id, id in silo, last updated time, created time
+    my $index_silo = $cls->open_silo( "$dir/index_silo",
+                                      "ILQQ"); #silo id, id in silo, last updated time, created time
         
 
     $index_silo || return undef;
 
-    my $transaction_index_silo = Yote::RecordStore::File::Silo->open_silo( "$dir/transaction_index_silo",
-                                                                           "IQ" ); #state, time
+    my $transaction_index_silo = $cls->open_silo( "$dir/transaction_index_silo",
+                                                  "IQ" ); #state, time
 
     $transaction_index_silo || return undef;
 
     my $silos = [];
 
     for my $silo_id ($min_silo_id..$max_silo_id) {
-        my $silo = $silos->[$silo_id] = Yote::RecordStore::File::Silo->open_silo( "$silo_dir/$silo_id",
-                                                                                  'ILLa*',  # status, id, data-length, data
-                                                                                  2 ** $silo_id ); #size
+        my $silo = $silos->[$silo_id] = $cls->open_silo( "$silo_dir/$silo_id",
+                                                         'ILLa*',  # status, id, data-length, data
+                                                         2 ** $silo_id ); #size
         $silo || return undef;
     }
 
@@ -210,10 +210,26 @@ sub open_store {
 
     $store->fix_transactions;
 
-    flock( $lock_fh, LOCK_UN );
+    _flock( $lock_fh, LOCK_UN );
 
     return $store;
 } #open_store
+
+sub _open {
+    my( $mod, $file) = @_;
+    open my ($fh), $mod, $file;
+    return $fh;
+}
+
+sub _flock {
+    my ($fh, $flags) = @_;
+    flock( $fh, $flags );
+}
+
+sub _openhandle {
+    my $fh = shift;
+    openhandle( $fh );
+}
 
 sub directory {
     shift->[DIRECTORY];
@@ -221,11 +237,12 @@ sub directory {
 
 sub lock {
     my $self = shift;
-    unless (openhandle( $self->[LOCK_FH] )) {
+    unless (_openhandle( $self->[LOCK_FH] )) {
         my $lockfile = "$self->[DIRECTORY]/LOCK";
-        open ($self->[LOCK_FH], -e $lockfile ? '+<' : '>', $lockfile ) || return undef;
+        $self->[LOCK_FH] = _open ( -e $lockfile ? '+<' : '>', $lockfile );
+        $self->[LOCK_FH] || return undef;
     }
-    flock( $self->[LOCK_FH], LOCK_EX ) || return undef;
+    _flock( $self->[LOCK_FH], LOCK_EX ) || return undef;
 
     $self->fix_transactions;
     $self->reset;
@@ -235,7 +252,7 @@ sub lock {
 
 sub unlock {
     my $self = shift;
-    flock( $self->[LOCK_FH], LOCK_UN ) || return undef;
+    _flock( $self->[LOCK_FH], LOCK_UN ) || return undef;
     return 1;
 }
 
@@ -268,6 +285,7 @@ sub fetch_meta {
     my( $self, $id ) = @_;
 
     if( $id > $self->record_count ) {
+        
         return undef;
     }
 
@@ -308,7 +326,7 @@ sub stow {
 #    print STDERR "WRITE $id ($new_silo_id/$new_id_in_silo) --> ".substr($_[1],0,100)."\n";
     my $t = int(time * 1000);
 
-    unless ($index->put_record( $id, [$new_silo_id,$new_id_in_silo, $t, $old_creation_time || $t] )) {
+    unless ($index->put_record( $id, [$new_silo_id,$new_id_in_silo, $t, $old_creation_time ? $old_creation_time : $t] )) {
         return undef;
     }
 
@@ -410,16 +428,8 @@ return;
     return 1;
 } #rollback_transaction
 
-sub get_record_count {
-    return shift->[INDEX_SILO]->entry_count;
-}
-
 sub index_silo {
     return shift->[INDEX_SILO];
-}
-
-sub max_file_size {
-    return shift->[MAX_FILE_SIZE];
 }
 
 sub silos {
@@ -510,6 +520,19 @@ sub silo_id_for_size {
 } #silo_id_for_size
 
 # ---------------------- private stuffs -------------------------
+
+sub open_silo {
+    my ($self, $silo_file, $template, $size, $max_file_size ) = @_;
+
+    
+
+    return Yote::RecordStore::File::Silo->open_silo( $silo_file,
+                                                     $template,
+                                                     $size,
+                                                     $max_file_size );
+}
+
+
 
 sub _make_path {
     my( $dir, $msg ) = @_;

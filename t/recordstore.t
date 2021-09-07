@@ -12,9 +12,10 @@ use lib './lib';
 use Yote::RecordStore::File;
 use Yote::RecordStore::File::Silo;
 use File::Path qw(make_path);
-use Fcntl ':mode';
+use Fcntl qw(:mode :flock);
 use File::Temp qw/ :mktemp tempdir /;
 use File::Path qw/ remove_tree /;
+use Scalar::Util qw(openhandle);
 use Test::More;
 use Time::HiRes qw( usleep );
 #use Errno qw(ENOENT);
@@ -50,21 +51,22 @@ api->test_suite_recordstore( $factory );
 done_testing;
 exit;
 
-sub failnice {
-    my( $subr, $errm, $msg ) = @_;
-    eval {
-        $subr->();
-        fail( $msg );
-    };
-    like( $@, qr/$errm/, "$msg error" );
-    undef $@;
-}
-
 sub test_init {
     my $dir = tempdir( CLEANUP => 1 );
+
+    is (Yote::RecordStore::File->first_id, 1, 'first id');
+
+    is (Yote::RecordStore::File->detect_version( $dir ), undef, 'no version file yet');
+
     my $rs = Yote::RecordStore::File->open_store( $dir );
 
+    ok (Yote::RecordStore::File->detect_version( $dir ) > 0, 'version file has version');
+    is (Yote::RecordStore::File->detect_version( $dir ), Yote::RecordStore::File->VERSION, 'version file with correct version');
+
     ok( $rs, 'inited store' );
+
+    is ($rs->directory, $dir, "recordstore directory" );
+
     is ( $rs->[Yote::RecordStore::File->MIN_SILO_ID], 12, "default min silo id" );
     is ( $rs->[Yote::RecordStore::File->MAX_SILO_ID], 31, "default max silo id" );
 
@@ -173,6 +175,7 @@ sub test_locks {
         fail( "Yote::RecordStore::File->lock called twice in a row" );
     };
     like( $@, qr/cannot be called twice in a row/, 'Yote::RecordStore::File->lock called twice in a row error message' );
+    undef $@;
     $store->unlock;
     $store->lock( "SOMETHING" );
     pass( "Store was able to lock after unlocking" );
@@ -215,7 +218,7 @@ sub test_locks {
             fail( "Yote::RecordStore::File->lock didnt die trying to lock to unwriteable directory" );
         };
         like( $@, qr/lock failed/, "unable to lock because of unwriteable lock directory" );
-
+        undef $@;
 
         $dir = tempdir( CLEANUP => 1 );
         eval {
@@ -229,7 +232,7 @@ sub test_locks {
             fail( "Yote::RecordStore::File->lock didnt die trying to lock unwriteable lock file" );
         };
         like( $@, qr/lock failed/, "unable to lock because of unwriteable lock file" );
-
+        undef $@;
     }
 } #test_locks
 
@@ -297,12 +300,200 @@ sub test_use {
     is ( $rs->active_entry_count, 3, "3 active items in silos after delete" );
     is ( $rs->silos_entry_count, 3, "now 3 items in silos after " );
 
+    ok ($rs->lock, "got lock");
+    is (flock( $rs->[Yote::RecordStore::File->LOCK_FH], LOCK_NB || LOCK_EX ), 0, 'unable to lock already locked fh' );
+    ok ($rs->unlock, "unlock");
+
+    {
+        my $breakon = 'silo';
+        no strict 'refs';
+        no warnings 'redefine';
+        local *Yote::RecordStore::File::_make_path = sub {
+            my ( $dir, $msg ) = @_;
+            if ( $msg eq $breakon ) {
+                $@ = "monkeypatch $msg";
+                return undef;
+            }
+            make_path( $dir, { error => \my $err } );
+            return 1;
+        };
+
+        is (Yote::RecordStore::File->open_store($dir), undef, 'no silo dir' );
+        like ($@, qr/monkeypatch silo/, 'no silo dir message');
+        undef $@;
+
+        $breakon = 'lock';
+        is (Yote::RecordStore::File->open_store($dir), undef, 'no lock dir' );
+        like ($@, qr/monkeypatch lock/, 'no lock dir message');
+        undef $@;
+
+        $breakon = 'transaction';
+        is (Yote::RecordStore::File->open_store($dir), undef, 'no transaction dir' );
+        like ($@, qr/monkeypatch transaction/, 'no transaction dir message');
+        undef $@;
+
+    }
+
+    {
+        my $breakon = 'index_silo';
+        no strict 'refs';
+        no warnings 'redefine';
+        local *Yote::RecordStore::File::open_silo = sub {
+            my ($self, $silo_file, $template, $size, $max_file_size ) = @_;
+            if ($silo_file =~ qr/${breakon}$/) {
+                $@ = "monkeypatch $breakon";
+                return undef;
+            }
+            return Yote::RecordStore::File::Silo->open_silo( $silo_file,
+                                                             $template,
+                                                             $size,
+                                                             $max_file_size );
+        };
+
+        is (Yote::RecordStore::File->open_store($dir), undef, 'no index silo' );
+        like ($@, qr/monkeypatch index_silo/, 'no index silo message');
+        undef $@;
+
+        $breakon = 'transaction_index_silo';
+        is (Yote::RecordStore::File->open_store($dir), undef, 'no transaction index silo' );
+        like ($@, qr/monkeypatch transaction_index_silo/, 'no transaction silo message');
+        undef $@;
+
+        $breakon = '12';
+        is (Yote::RecordStore::File->open_store($dir), undef, 'no data silo' );
+        like ($@, qr/monkeypatch 12/, 'no data silo message');
+        undef $@;
+    }
+    
+
+    {
+        ok (-e "$dir/LOCK", "lock file exists");
+
+        no strict 'refs';
+        no warnings 'redefine';
+        local *Yote::RecordStore::File::_openhandle = sub {
+            $@ = "monkeypatch _openhandle";
+            return undef;
+        };
+        
+        ok ($rs->lock, "got lock with filehandle closed");
+        like ($@, qr/monkeypatch _openhandle/, 'openhandle failed message');
+        undef $@;
+        is (flock( $rs->[Yote::RecordStore::File->LOCK_FH], LOCK_NB || LOCK_EX ), 0, 'unable to lock already locked fh filehandle closed' );
+        ok ($rs->unlock, "unlock filehandle");
+
+        unlink "$dir/LOCK";
+        ok ($rs->lock, "got lock with filehandle closed and lockfile removed");
+        like ($@, qr/monkeypatch _openhandle/, 'openhandle failed message');
+        undef $@;
+        ok (-e "$dir/LOCK", "lock file regenerated");
+        is (flock( $rs->[Yote::RecordStore::File->LOCK_FH], LOCK_NB || LOCK_EX ), 0, 'unable to lock already locked fh filehandle closed' );
+        ok ($rs->unlock, "unlock filehandle");
+        
+        local *Yote::RecordStore::File::_open = sub {
+            $@ = 'monkeypatch _open ';
+            return undef;
+        };
+        is ($rs->lock, undef, "lock fail with open fail");
+        like ($@, qr/monkeypatch _open /, 'open failed');
+    }
+
+    {
+        ok (-e "$dir/LOCK", "lock file exists");
+        ok ($rs->lock, 'lock works');
+        ok ($rs->unlock, 'unlock works');
+
+        ok ($rs->lock, 'lock works before _flock monkey');
+        no strict 'refs';
+        no warnings 'redefine';
+        my $fail = 1;
+        local *Yote::RecordStore::File::_flock = sub {
+            my ($fh, $flags) = @_;
+            if ($fail) {
+                $@ = "monkeypatch flock";
+                return undef;
+            }
+            flock( $fh, $flags );
+        };
+        is ($rs->unlock, undef, 'unlock fail due to monkeypatch');
+        like ($@, qr/monkeypatch flock/, '');
+        undef $@;
+
+        is ($rs->lock, undef, 'lock fail due to monkeypatch');
+        like ($@, qr/monkeypatch flock/, '');
+        undef $@;
+    }
+
+    $dir = tempdir( CLEANUP => 1 );
+    $rs = Yote::RecordStore::File->open_store("$dir/deeper");
+    ok ($rs, 'make record store in non existing directory' );
+
+    open my $in, '>', "$dir/deeper/VERSION";
+    print $in "5.0";
+    close $in;
+    my $rs2 = Yote::RecordStore::File->open_store("$dir/deeper");
+    is ($rs2, undef, 'no opening previous version');
+    like ($@, qr/Cannot open recordstore.*with version 5.0/, 'no opening previous version error msg');
+    undef $@;
+
+
+    $dir = "/";
+    $rs = Yote::RecordStore::File->open_store("$dir/deeper");
+    is ($rs, undef, 'cant make record store in non-writeable directory' );
+
+    {
+        # test lockfile cant be written
+        my $old_open = *CORE::open;
+        no strict 'refs';
+        no warnings 'redefine';
+        local *Yote::RecordStore::File::_open = sub {
+            my ($mode, $file) = @_;
+            if ($file =~ /LOCK$/) {
+                $@ = 'monkeypatch';
+                return undef;
+            }
+            open my( $fh), $mode, $file;
+            return $fh;
+        };
+        $dir = tempdir( CLEANUP => 1 );
+        $rs = Yote::RecordStore::File->open_store("$dir/deeper");
+        is ($rs, undef, 'make record store fail on lock' );
+    }
+
+    {
+        $dir = tempdir( CLEANUP => 1 );
+        $rs = Yote::RecordStore::File->open_store($dir);
+
+        is ($rs->stow( "BOOPO" ), 1, "first record again" );
+        is ($rs->stow( "nuther", 1 ), 1, "first record again again" );
+
+        is ($rs->stow( "too" ), 2, "second record again" );
+
+        ok ($rs->delete_record(2), "second record deleted" );
+
+        no strict 'refs';
+        use Fcntl qw( :flock SEEK_SET );
+        local *Yote::RecordStore::File::Silo::put_record = sub {
+            $@ = 'monkeypatch put';
+            return undef;
+        };
+        is ($rs->stow("NYET"), undef, 'No id for monkied put record on stow' );
+        like ($@, qr/monkeypatch put/, 'No id for monkied put record on stow message' );
+        undef $@;
+
+        is ($rs->delete_record(1), undef, 'No id for monkied put record on delete' );
+        like ($@, qr/monkeypatch put/, 'No id for monkied put record on delete' );
+        undef $@;
+    }
+
+
+
     $dir = tempdir( CLEANUP => 1 );
     $rs = Yote::RecordStore::File->open_store($dir);
 
     $rs->stow( "SOMETHING SOMETHING" ); #1
     $id = $rs->stow( "DELME LIKE" );    #2
-    my $rs2 = Yote::RecordStore::File->open_store($dir);
+    $rs2 = Yote::RecordStore::File->open_store($dir);
 
     # $rs2->use_transaction;
     # $rs2->stow( "TO NOT BE MADE" );    #3
@@ -337,10 +528,12 @@ sub test_transactions {
     is ($rs->rollback_transaction(), undef, 'cant roll back without transaction' );
 
     like( $@, qr/no transaction to roll back/i, "error message for trying to roll back no transaction" );
+    undef $@;
 
     is ($rs->commit_transaction(), undef,  "cant commit without transaction" );
 
     like( $@, qr/no transaction to commit/i, "error message for trying to commit no transaction" );
+    undef $@;
 
     is ( $rs->transaction_silo->entry_count, 0, 'trans silo starts with no count' );
     $copy->reset;
@@ -353,6 +546,7 @@ sub test_transactions {
         open( STDERR, ">>", \$errout );
         $rs->use_transaction();
         like( $errout, qr/already in transaction/, 'already in transaction warning' );
+        undef $@;
     };
 
     is ( $rs->transaction_silo->entry_count, 1, 'trans silo now with one count' );
@@ -366,6 +560,7 @@ sub test_transactions {
 
         $rs->use_transaction();
         like( $errout, qr/already in transaction/i, "error message for trying to transaction twice" );
+        undef $@;
         pass( "able to open transaction twice" );
     };
 
@@ -432,6 +627,7 @@ sub test_transactions {
             fail( 'was able to use transaction with unwritable dir' );
         };
         like( $@, qr/permission denied/i, 'err msg for trans with unwrite dir' );
+        undef $@;
     }
 
     $dir = tempdir( CLEANUP => 1 );
@@ -545,10 +741,12 @@ sub test_transactions {
     is ( $rs->fetch( $id4 ), "CHANGED THIS UP", "~ same size thing changed in trans");
     is ($rs->commit_transaction, undef,  "cant commit due to monkeypatched error" );
     like ($@, qr/Breakpoint/, 'break msg' );
+    undef $@;
 
     is ( $rs->use_transaction->{state}, Yote::RecordStore::File::Transaction::TR_IN_COMMIT, "transaction is in commit" );
     is ( $rs->fetch( $id1 ), undef, 'fetch returns undef when in bad state' );
     like ($@, qr/Transaction is in a bad state/ );
+    undef $@;
 
     # test if the state of the recordstore fixes itself with transaction in bad state
     is ( $copy->fetch( $id1 ), "THIS IS THE FIRST ONE IN THE FIRST PLACE", "id 1 unchanged" );
@@ -569,12 +767,14 @@ sub test_transactions {
         fail( "able to rollback without the monkeypatched die" );
     };
     like ($@, qr/Breakpoint/, 'break msg' );
+    undef $@;
     eval {
         my $res = $rs->fetch( $id1 );
         fail( "Able to get result from bad transaction" );
     };
     if( $@ ) {
         like ($@, qr/Transaction is in a bad state/, 'bad state errm' );
+        undef $@;
     }
     # test if the state of the recordstore fixes itself with transaction in bad state
     is ( $copy->fetch( $id1 ), "THIS IS THE FIRST ONE IN THE FIRST PLACE", "id 1 unchanged" );
@@ -676,6 +876,10 @@ sub test_sillystrings {
 sub test_meta {
     my $dir = tempdir( CLEANUP => 1 );
     my $store = Yote::RecordStore::File->open_store( $dir );
+
+    is ($store->fetch_meta( 3 ), undef, 'no meta to fetch' );
+    undef $@;
+
     my $id = $store->stow( "THISISATEST" );
 
     my ($upd, $cr ) = $store->fetch_meta( $id );
