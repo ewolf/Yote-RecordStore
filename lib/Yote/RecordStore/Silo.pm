@@ -1,4 +1,4 @@
-package Yote::RecordStore::File::Silo;
+package Yote::RecordStore::Silo;
 
 use strict;
 use warnings;
@@ -15,8 +15,8 @@ use IO::Handle;
 use vars qw($VERSION);
 $VERSION = '6.00';
 
-$Yote::RecordStore::File::Silo::DEFAULT_MAX_FILE_SIZE = 2_000_000_000;
-$Yote::RecordStore::File::Silo::DEFAULT_MIN_FILE_SIZE = 4_096;
+$Yote::RecordStore::Silo::DEFAULT_MAX_FILE_SIZE = 2_000_000_000;
+$Yote::RecordStore::Silo::DEFAULT_MIN_FILE_SIZE = 4_096;
 
 use constant {
     DIRECTORY           => 0,
@@ -57,7 +57,7 @@ sub open_silo {
     }
 
     if( $max_file_size < 1 ) {
-        $max_file_size = $Yote::RecordStore::File::Silo::DEFAULT_MAX_FILE_SIZE;
+        $max_file_size = $Yote::RecordStore::Silo::DEFAULT_MAX_FILE_SIZE;
     }
 
     unless( -e "$dir/0" ) {
@@ -430,13 +430,13 @@ __END__
 
 =head1 NAME
 
- Yote::RecordStore::File::Silo - Indexed Fixed Record Store
+ Yote::RecordStore::Silo - Indexed Fixed Record Store
 
 =head1 SYNPOSIS
 
- use Yote::RecordStore::File::Silo;
+ use Yote::RecordStore::Silo;
 
- my $silo = Yote::RecordStore::File->open_silo( $directory, $template, $record_size, $max_file_size );
+ my $silo = Yote::RecordStore->open_silo( $directory, $template, $record_size, $max_file_size );
 
  my $id = $silo->next_id;
  $silo->put_record( $id, [ 2234234324234, 42, "THIS IS SOME TEXT" ] );

@@ -15,7 +15,7 @@ use forker;
 #$SIG{ __DIE__ } = sub { Carp::confess( @_ ) };
 
 use lib './lib';
-use Yote::RecordStore::File::Silo;
+use Yote::RecordStore::Silo;
 
 # -----------------------------------------------------
 #               init
@@ -64,30 +64,30 @@ sub warnnice {
 sub test_init {
     my $dir = tempdir( CLEANUP => 1 );
     my $size = 2 ** 10;
-    my $silo = Yote::RecordStore::File::Silo->open_silo( $dir, 'LZ*', $size );
+    my $silo = Yote::RecordStore::Silo->open_silo( $dir, 'LZ*', $size );
     ok( $silo, "Got a silo" );
-    my $new_silo = Yote::RecordStore::File::Silo->open_silo( $dir, 'LZ*', $size );
+    my $new_silo = Yote::RecordStore::Silo->open_silo( $dir, 'LZ*', $size );
     ok( $new_silo, "able to renit already inited silo with same params" );
 
-    failnice( sub { Yote::RecordStore::File::Silo->open_silo( $dir, 'LZ*' ) },
+    failnice( sub { Yote::RecordStore::Silo->open_silo( $dir, 'LZ*' ) },
               "no record size given to open silo",
               "was able to reinit silo withthout specifying record size" );
-    failnice( sub { Yote::RecordStore::File::Silo->open_silo( $dir, undef, 100 ) },
+    failnice( sub { Yote::RecordStore::Silo->open_silo( $dir, undef, 100 ) },
               "must supply template to open silo",
               "was able to reinit silo withthout specifying template" );
 
-    failnice( sub { Yote::RecordStore::File::Silo->open_silo() },
+    failnice( sub { Yote::RecordStore::Silo->open_silo() },
               "must supply directory to open silo",
               "was able to reinit silo withthout specifying dir" );
 
     $dir = tempdir( CLEANUP => 1 );
 
-    failnice( sub { Yote::RecordStore::File::Silo->open_silo( $dir, 'LLL', 800 ) },
+    failnice( sub { Yote::RecordStore::Silo->open_silo( $dir, 'LLL', 800 ) },
               'do not match',
               'template size and given size do not match' );
     
     
-    $silo = Yote::RecordStore::File::Silo->open_silo( $dir, 'LLL' );
+    $silo = Yote::RecordStore::Silo->open_silo( $dir, 'LLL' );
     is( $silo->template, 'LLL', 'given template matches' );
 
     is( $silo->max_file_size, 2_000_000_000, "silo is default max size" );
@@ -101,7 +101,7 @@ sub test_init {
         $dir = tempdir( CLEANUP => 1 );
         my $cantdir = "$dir/cant";
 
-        local *Yote::RecordStore::File::Silo::_make_path = sub {
+        local *Yote::RecordStore::Silo::_make_path = sub {
             my ($dir,$err) = @_;
             if ($dir =~ /cant$/) {
                 $$err = [$dir];
@@ -110,17 +110,17 @@ sub test_init {
             make_path( $dir, { error => \$err } );
         };
 
-        failnice( sub { Yote::RecordStore::File::Silo->open_silo( $cantdir, 'LL' ) },
+        failnice( sub { Yote::RecordStore::Silo->open_silo( $cantdir, 'LL' ) },
                   "unable to make",
                   'was able to init a silo in an unwritable directory' );
      }
-    $Yote::RecordStore::File::Silo::DEFAULT_MAX_FILE_SIZE = 2_000_000_000;
+    $Yote::RecordStore::Silo::DEFAULT_MAX_FILE_SIZE = 2_000_000_000;
 } #test_init
 
 sub test_use {
     my $dir = tempdir( CLEANUP => 1 );
     my $size = 2 ** 10;
-    my $silo = Yote::RecordStore::File::Silo->open_silo( $dir, 'Z*', $size, $size * 10, );
+    my $silo = Yote::RecordStore::Silo->open_silo( $dir, 'Z*', $size, $size * 10, );
     is( $silo->size, 0, 'nothing in the silo, no size' );
     is( $silo->entry_count, 0, 'nothing in the silo, no entries' );
     is_deeply( [$silo->subsilos], [0], 'one subsilo upon creation' );
@@ -209,12 +209,12 @@ sub test_use {
 
     {
 
-        $silo = Yote::RecordStore::File::Silo->open_silo( $dir, 'Z*', $size, $size * 10 );
+        $silo = Yote::RecordStore::Silo->open_silo( $dir, 'Z*', $size, $size * 10 );
 
         {
             no strict 'refs';
             no warnings 'redefine';
-            local *Yote::RecordStore::File::Silo::_opensilosdir = sub {
+            local *Yote::RecordStore::Silo::_opensilosdir = sub {
                 $@ = 'monkeypatch';
                 return undef;
             };
@@ -285,7 +285,7 @@ sub test_use {
         {
             no strict 'refs';
             no warnings 'redefine';
-            local *Yote::RecordStore::File::Silo::_open = sub {
+            local *Yote::RecordStore::Silo::_open = sub {
                 my( $mod, $file) = @_;
                 if ($file eq "$dir/0") {
                     $@ = 'monkeypatch';
@@ -313,7 +313,7 @@ sub test_use {
 
     $dir = tempdir( CLEANUP => 1 );
     $size = 2 ** 10;
-    $silo = Yote::RecordStore::File::Silo->open_silo( $dir, 'LIZ*', $size, $size * 10 );
+    $silo = Yote::RecordStore::Silo->open_silo( $dir, 'LIZ*', $size, $size * 10 );
     my $id = $silo->next_id;
     is_deeply( $silo->get_record(1), [0,0,''], 'starting with nothing' );
     $silo->put_record( $id, [12,8,"FOOFOO"] );
@@ -329,7 +329,7 @@ sub test_use {
 
     $dir = tempdir( CLEANUP => 1 );
     $size = 2 ** 10;
-    $silo = Yote::RecordStore::File::Silo->open_silo( $dir, 'Z*', $size );
+    $silo = Yote::RecordStore::Silo->open_silo( $dir, 'Z*', $size );
     $id = $silo->push( "BARFY" );
     is_deeply( $silo->get_record($id), ['BARFY'], 'got record after single item on' );
     $silo->put_record( $id, "BARFYYY", "Z*" );
@@ -341,17 +341,17 @@ sub test_use {
     is_deeply( $silo->get_record($id,4), ['BARF'], 'use size rather than template for get_record ' );
 
     $dir = tempdir( CLEANUP => 1 );
-    $silo = Yote::RecordStore::File::Silo->open_silo( $dir, 'LIL' );
+    $silo = Yote::RecordStore::Silo->open_silo( $dir, 'LIL' );
     $silo->push( [234,4,6654] );
     is_deeply( $silo->get_record( 1, 'LI' ), [234,4], 'get front part' );
     is_deeply( $silo->get_record( 1, 'I', 4 ), [4], 'get second' );
 
     
-    $Yote::RecordStore::File::Silo::DEFAULT_MAX_FILE_SIZE = 2_000_000_000;
+    $Yote::RecordStore::Silo::DEFAULT_MAX_FILE_SIZE = 2_000_000_000;
 
     # test copy numbers
     $dir = tempdir( CLEANUP => 1 );
-    $silo = Yote::RecordStore::File::Silo->open_silo( $dir, 'LL' );
+    $silo = Yote::RecordStore::Silo->open_silo( $dir, 'LL' );
     $silo->push( [ 3, 56 ] );
     $id = $silo->next_id;
     $silo->copy_record( 1, 2 );
@@ -360,7 +360,7 @@ sub test_use {
     
     # test copy
     $dir = tempdir( CLEANUP => 1 );
-    $silo = Yote::RecordStore::File::Silo->open_silo( $dir, 'Z*', 2 ** 12 );
+    $silo = Yote::RecordStore::Silo->open_silo( $dir, 'Z*', 2 ** 12 );
     $id = $silo->push( "SOMETHING EXCELLENT" );
     is ($id, 1, 'firsty id');
     is_deeply( $silo->get_record(1), ['SOMETHING EXCELLENT'], 'first value' );
@@ -390,19 +390,19 @@ sub test_use {
     is_deeply( $silo->get_record(1), ['SOMETHING EXCELLENT'], 'original still there' );
 
     $size = 2 ** 10;
-    $silo = Yote::RecordStore::File::Silo->open_silo( $dir, 'Z*', $size, $size * 10, );
+    $silo = Yote::RecordStore::Silo->open_silo( $dir, 'Z*', $size, $size * 10, );
     failnice (sub {$silo->push( "WRONG".('x'x$size) )}, 'too large', 'push record too big' );
 
     {
         my $dir2 = tempdir( CLEANUP => 1 );
-        my $silo2 = Yote::RecordStore::File::Silo->open_silo( $dir2, 'Z*', $size, $size * 10, );
+        my $silo2 = Yote::RecordStore::Silo->open_silo( $dir2, 'Z*', $size, $size * 10, );
         is ($silo2->push( "TEST" ), 1, "able to insert test" );
         is_deeply( $silo2->get_record(1), ['TEST'], 'put record in simple silo' );
 
         my $trip = 1;
         no strict 'refs';
         no warnings 'redefine';
-        local *Yote::RecordStore::File::Silo::_open = sub {
+        local *Yote::RecordStore::Silo::_open = sub {
             if ($trip++ > 0) {
                 $@ = 'monkeypatch';
                 return undef;
@@ -418,7 +418,7 @@ sub test_use {
                    'unable to empty silo due to monkeypatch' );
 
         $dir = tempdir( CLEANUP => 1 );
-        failnice( sub { $silo = Yote::RecordStore::File::Silo->open_silo( $dir, 'Z*', $size, $size * 10, ); },
+        failnice( sub { $silo = Yote::RecordStore::Silo->open_silo( $dir, 'Z*', $size, $size * 10, ); },
                   'unable to create silo data file',
                   'file wont open so open_silo fails' );
 
@@ -440,13 +440,13 @@ sub test_async {
     my $dir = tempdir( CLEANUP => 1 );
     my $forker = forker->new( $dir );
     my $size = 2 ** 10;
-    my $silo = Yote::RecordStore::File::Silo->open_silo( $dir, 'Z*', $size );
+    my $silo = Yote::RecordStore::Silo->open_silo( $dir, 'Z*', $size );
     
     $forker->init();
 
     my $A = fork;    
     unless( $A ) {
-        $silo = Yote::RecordStore::File::Silo->open_silo( $dir, 'Z*', $size );
+        $silo = Yote::RecordStore::Silo->open_silo( $dir, 'Z*', $size );
         $forker->expect( '1' );
         usleep( 5000 );
         my $id = $silo->next_id;
@@ -456,7 +456,7 @@ sub test_async {
 
     my $B = fork;    
     unless( $B ) {
-        $silo = Yote::RecordStore::File::Silo->open_silo( $dir, 'Z*', $size );
+        $silo = Yote::RecordStore::Silo->open_silo( $dir, 'Z*', $size );
         $forker->spush( '1' );
         $forker->expect( "ID A 1" );
         my $id = $silo->push( "SOUPS" );
@@ -466,7 +466,7 @@ sub test_async {
 
     my $C = fork;    
     unless( $C ) {
-        $silo = Yote::RecordStore::File::Silo->open_silo( $dir, 'Z*', $size );
+        $silo = Yote::RecordStore::Silo->open_silo( $dir, 'Z*', $size );
         $forker->spush( '1' );
         $forker->spush( "ID A 1" );
         $forker->expect( "ID B 2" );

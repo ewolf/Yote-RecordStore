@@ -1,4 +1,4 @@
-package Yote::RecordStore::File::Transaction;
+package Yote::RecordStore::Transaction;
 
 # TODO - verify perldoc
 #      - shed/keep YAML?
@@ -343,11 +343,11 @@ __END__
 
 =head1 NAME
 
- Yote::RecordStore::File::Transaction - Transaction support for Yote::RecordStore::File
+ Yote::RecordStore::Transaction - Transaction support for Yote::RecordStore
 
 =head1 DESCRIPTION
 
-This is used by Yote::RecordStore::File and is not meant for use outside of it.
+This is used by Yote::RecordStore and is not meant for use outside of it.
 
 =head1 METHODS
 

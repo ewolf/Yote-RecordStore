@@ -9,8 +9,8 @@ use api;
 use Data::Dumper;
 
 use lib './lib';
-use Yote::RecordStore::File;
-use Yote::RecordStore::File::Silo;
+use Yote::RecordStore;
+use Yote::RecordStore::Silo;
 use File::Path qw(make_path);
 use Fcntl qw(:mode :flock SEEK_SET);
 use File::Temp qw/ :mktemp tempfile tempdir /;
@@ -101,7 +101,7 @@ sub get_rec {
 sub test_misc {
     my $dir = tempdir( CLEANUP => 1 );
     chmod 0444, $dir;
-    failnice( sub{Yote::RecordStore::File::_open( "$dir/foo" )},
+    failnice( sub{Yote::RecordStore::_open( "$dir/foo" )},
               'Permission denied',
               'open write only file' );
     chmod 0666, $dir;
@@ -110,7 +110,7 @@ sub test_misc {
 sub test_vacate {
     my $dir = tempdir( CLEANUP => 1 );
 
-    my $rs = Yote::RecordStore::File->open_store( $dir );
+    my $rs = Yote::RecordStore->open_store( $dir );
 
     my $silo = $rs->silos->[12];
     is ($silo->entry_count, 0, 'silo starts off empty' );
@@ -158,7 +158,7 @@ sub test_vacate {
     {
         # test an interrupted stow with items marked RS_IN_TRANSACTION
         $dir = tempdir( CLEANUP => 1 );
-        my $store = Yote::RecordStore::File->open_store( $dir );
+        my $store = Yote::RecordStore->open_store( $dir );
 
         locks ($store);
 
@@ -187,7 +187,7 @@ sub test_vacate {
         # test an interrupted stow with items marked RS_IN_TRANSACTION
         $dir = tempdir( CLEANUP => 1 );
 
-        my $store = Yote::RecordStore::File->open_store( $dir );
+        my $store = Yote::RecordStore->open_store( $dir );
 
         locks ($store);
 
@@ -212,7 +212,7 @@ sub test_vacate {
 
         no strict 'refs';
         no warnings 'redefine';
-        local *Yote::RecordStore::File::Silo::copy_record = sub {
+        local *Yote::RecordStore::Silo::copy_record = sub {
             die 'monkey wrench';
         };
 
@@ -228,7 +228,7 @@ sub test_vacate {
         $dir = tempdir( CLEANUP => 1 );
 
 
-        my $store = Yote::RecordStore::File->open_store( $dir );
+        my $store = Yote::RecordStore->open_store( $dir );
 
         my $silo = $store->silos->[12];
         my $bsilo = $store->silos->[13];
@@ -250,7 +250,7 @@ sub test_vacate {
 
             no strict 'refs';
             no warnings 'redefine';
-            local *Yote::RecordStore::File::Silo::pop = sub {
+            local *Yote::RecordStore::Silo::pop = sub {
                 my $self = shift;
                 if ($self->[0] =~ /trans/) {
                     die 'monkey wrench';
@@ -272,7 +272,7 @@ sub test_vacate {
 
         }
 
-        $store = Yote::RecordStore::File->open_store( $dir );
+        $store = Yote::RecordStore->open_store( $dir );
         is_deeply( get_rec(1, $bsilo), [$rs->RS_ACTIVE,1,7_000,$large], 'rec 1' );
         $silo = $store->silos->[12];
         $bsilo = $store->silos->[13];
@@ -290,67 +290,67 @@ sub test_vacate {
 sub test_init {
     my $dir = tempdir( CLEANUP => 1 );
 
-    is (Yote::RecordStore::File->first_id, 1, 'first id');
+    is (Yote::RecordStore->first_id, 1, 'first id');
 
-    is (Yote::RecordStore::File->detect_version( $dir ), undef, 'no version file yet');
+    is (Yote::RecordStore->detect_version( $dir ), undef, 'no version file yet');
 
-    my $rs = Yote::RecordStore::File->open_store( $dir );
+    my $rs = Yote::RecordStore->open_store( $dir );
 
-    ok (Yote::RecordStore::File->detect_version( $dir ) > 0, 'version file has version');
-    is (Yote::RecordStore::File->detect_version( $dir ), Yote::RecordStore::File->VERSION, 'version file with correct version');
+    ok (Yote::RecordStore->detect_version( $dir ) > 0, 'version file has version');
+    is (Yote::RecordStore->detect_version( $dir ), Yote::RecordStore->VERSION, 'version file with correct version');
 
     ok( $rs, 'inited store' );
     is ($rs->directory, $dir, "recordstore directory" );
 
-    is ( $rs->[Yote::RecordStore::File->MIN_SILO_ID], 12, "default min silo id" );
-    is ( $rs->[Yote::RecordStore::File->MAX_SILO_ID], 31, "default max silo id" );
+    is ( $rs->[Yote::RecordStore->MIN_SILO_ID], 12, "default min silo id" );
+    is ( $rs->[Yote::RecordStore->MAX_SILO_ID], 31, "default max silo id" );
 
     my $silos = $rs->silos;
-    is ( @$silos - $rs->[Yote::RecordStore::File->MIN_SILO_ID], 1 + (31 - 12), '20 silos' );
+    is ( @$silos - $rs->[Yote::RecordStore->MIN_SILO_ID], 1 + (31 - 12), '20 silos' );
     $rs->[$rs->LOCK_FH] = undef;
 
-    $rs = Yote::RecordStore::File->open_store( $dir );
+    $rs = Yote::RecordStore->open_store( $dir );
     ok( $rs, 'reopen store right stuff' );
-    is ( @$silos - $rs->[Yote::RecordStore::File->MIN_SILO_ID], 1 + (31 - 12), 'still 20 silos' );
+    is ( @$silos - $rs->[Yote::RecordStore->MIN_SILO_ID], 1 + (31 - 12), 'still 20 silos' );
 
     $dir = tempdir( CLEANUP => 1 );
-    $rs = Yote::RecordStore::File->open_store( "$dir/NOODIR" );
+    $rs = Yote::RecordStore->open_store( "$dir/NOODIR" );
 
     ok( $rs, 'inited store' );
 
     $dir = tempdir( CLEANUP => 1 );
 
     {
-        local $Yote::RecordStore::File::Silo::DEFAULT_MAX_FILE_SIZE = 3_000_000_000;
-        local $Yote::RecordStore::File::Silo::DEFAULT_MIN_FILE_SIZE = 300;
-        $rs = Yote::RecordStore::File->open_store( $dir );
+        local $Yote::RecordStore::Silo::DEFAULT_MAX_FILE_SIZE = 3_000_000_000;
+        local $Yote::RecordStore::Silo::DEFAULT_MIN_FILE_SIZE = 300;
+        $rs = Yote::RecordStore->open_store( $dir );
         ok( $rs, 'reinit store right stuff' );
-        is ( $rs->[Yote::RecordStore::File->MIN_SILO_ID], 9, "min silo id for 300 min size" );
-        is ( @$silos - $rs->[Yote::RecordStore::File->MIN_SILO_ID], 1 + (31 - 9), 'number of silos' );
+        is ( $rs->[Yote::RecordStore->MIN_SILO_ID], 9, "min silo id for 300 min size" );
+        is ( @$silos - $rs->[Yote::RecordStore->MIN_SILO_ID], 1 + (31 - 9), 'number of silos' );
     }
 
     {
-        local $Yote::RecordStore::File::Silo::DEFAULT_MAX_FILE_SIZE = 2 ** 12;
+        local $Yote::RecordStore::Silo::DEFAULT_MAX_FILE_SIZE = 2 ** 12;
         $dir = tempdir( CLEANUP => 1 );
-        $rs = Yote::RecordStore::File->open_store( $dir );
+        $rs = Yote::RecordStore->open_store( $dir );
         $silos = $rs->silos;
-        is ( @$silos - $rs->[Yote::RecordStore::File->MIN_SILO_ID], 13 - 12, '1 silo' );
+        is ( @$silos - $rs->[Yote::RecordStore->MIN_SILO_ID], 13 - 12, '1 silo' );
     }
 
     {
-        local $Yote::RecordStore::File::Silo::DEFAULT_MIN_FILE_SIZE = 2 ** 10;
+        local $Yote::RecordStore::Silo::DEFAULT_MIN_FILE_SIZE = 2 ** 10;
         $dir = tempdir( CLEANUP => 1 );
-        $rs = Yote::RecordStore::File->open_store($dir);
-        is ( $rs->[Yote::RecordStore::File->MIN_SILO_ID], 10, 'min silo id is 10' );
-        is ( $rs->[Yote::RecordStore::File->MAX_SILO_ID], 31, 'max silo id is 31' );
+        $rs = Yote::RecordStore->open_store($dir);
+        is ( $rs->[Yote::RecordStore->MIN_SILO_ID], 10, 'min silo id is 10' );
+        is ( $rs->[Yote::RecordStore->MAX_SILO_ID], 31, 'max silo id is 31' );
         $silos = $rs->silos;
-        is ( $#$silos - $rs->[Yote::RecordStore::File->MIN_SILO_ID], 31 - 10, '21 silos' );
+        is ( $#$silos - $rs->[Yote::RecordStore->MIN_SILO_ID], 31 - 10, '21 silos' );
     }
 
     # if( ! $is_root ) {
     #     $dir = tempdir( CLEANUP => 1 );
     #     chmod 0444, $dir;
-    #     failnice( Yote::RecordStore::File->open_store("$dir/cant"),
+    #     failnice( Yote::RecordStore->open_store("$dir/cant"),
     #               'permission denied',
     #               'made a directory that it could not' );
 
@@ -361,20 +361,20 @@ sub test_init {
     #     close $out;
     #     chmod 0444, $lockfile;
     #     failnice(
-    #         Yote::RecordStore::File->open_store( $dir ),
+    #         Yote::RecordStore->open_store( $dir ),
     #               "permission denied",
     #               "was able to init store with unwritable lock file" );
 
     #     $dir = tempdir( CLEANUP => 1 );
-    #     Yote::RecordStore::File->open_store( $dir );
+    #     Yote::RecordStore->open_store( $dir );
     #     chmod 0000, "$dir/LOCK";
-    #     failnice( Yote::RecordStore::File->open_store( $dir ),
+    #     failnice( Yote::RecordStore->open_store( $dir ),
     #               'permission denied',
     #               'was able to reopen store with unwritable lock file' );
 
     #     $dir = tempdir( CLEANUP => 1 );
     #     chmod 0444, "$dir";
-    #     failnice( Yote::RecordStore::File->open_store( $dir ),
+    #     failnice( Yote::RecordStore->open_store( $dir ),
     #               'permission denied',
     #               'was not able to open store in unwritable directory' );
 
@@ -382,19 +382,19 @@ sub test_init {
     #     open $out, ">", "$dir/VERSION";
     #     print $out "666\n";
     #     close $out;
-    #     failnice( Yote::RecordStore::File->open_store( $dir ),
+    #     failnice( Yote::RecordStore->open_store( $dir ),
     #               'Aborting open',
     #               'opened with version file but no lockfile' );
     # }
 
     {
-        local $Yote::RecordStore::File::Silo::DEFAULT_MAX_FILE_SIZE = 2 ** 12;
+        local $Yote::RecordStore::Silo::DEFAULT_MAX_FILE_SIZE = 2 ** 12;
         $dir = tempdir( CLEANUP => 1 );
-        $rs = Yote::RecordStore::File->open_store( $dir );
+        $rs = Yote::RecordStore->open_store( $dir );
 
         ok( $rs, 'opened a record store' );
         $silos = $rs->silos;
-        is ( @$silos - $rs->[Yote::RecordStore::File->MIN_SILO_ID], 13 - 12, 'opened with correct number of silos' );
+        is ( @$silos - $rs->[Yote::RecordStore->MIN_SILO_ID], 13 - 12, 'opened with correct number of silos' );
     }
 
 } #test_init
@@ -403,14 +403,14 @@ sub test_locks {
     my $use_single = shift;
     my $dir = tempdir( CLEANUP => 1 );
 
-    my $store = Yote::RecordStore::File->open_store( $dir );
+    my $store = Yote::RecordStore->open_store( $dir );
     $store->lock( "FOO", "BAR", "BAZ", "BAZ" );
 
     eval {
         $store->lock( "SOMETHING" );
-        fail( "Yote::RecordStore::File->lock called twice in a row" );
+        fail( "Yote::RecordStore->lock called twice in a row" );
     };
-    like( $@, qr/cannot be called twice in a row/, 'Yote::RecordStore::File->lock called twice in a row error message' );
+    like( $@, qr/cannot be called twice in a row/, 'Yote::RecordStore->lock called twice in a row error message' );
     undef $@;
     $store->unlock;
     $store->lock( "SOMETHING" );
@@ -446,26 +446,26 @@ sub test_locks {
 
         $dir = tempdir( CLEANUP => 1 );
         eval {
-            $store = Yote::RecordStore::File->open_store( $dir );
+            $store = Yote::RecordStore->open_store( $dir );
             pass( "Was able to open store" );
             chmod 0444, "$dir/user_locks";
 
             $store->lock( "FOO" );
-            fail( "Yote::RecordStore::File->lock didnt die trying to lock to unwriteable directory" );
+            fail( "Yote::RecordStore->lock didnt die trying to lock to unwriteable directory" );
         };
         like( $@, qr/lock failed/, "unable to lock because of unwriteable lock directory" );
         undef $@;
 
         $dir = tempdir( CLEANUP => 1 );
         eval {
-            $store = Yote::RecordStore::File->open_store( $dir );
+            $store = Yote::RecordStore->open_store( $dir );
             open my $out, '>', "$dir/user_locks/BAR";
             print $out '';
             close $out;
             chmod 0444, "$dir/user_locks/BAR";
             pass( "Was able to open store" );
             $store->lock( "FOO", "BAR", "BAZ" );
-            fail( "Yote::RecordStore::File->lock didnt die trying to lock unwriteable lock file" );
+            fail( "Yote::RecordStore->lock didnt die trying to lock unwriteable lock file" );
         };
         like( $@, qr/lock failed/, "unable to lock because of unwriteable lock file" );
         undef $@;
@@ -474,7 +474,7 @@ sub test_locks {
 
 sub test_use {
     my $dir = tempdir( CLEANUP => 1 );
-    my $rs = Yote::RecordStore::File->open_store($dir);
+    my $rs = Yote::RecordStore->open_store($dir);
 
     failnice (sub {$rs->record_count},
                'store not locked',
@@ -592,7 +592,7 @@ sub test_use {
     # ---------------------
 
     $dir = tempdir( CLEANUP => 1 );
-    $rs = Yote::RecordStore::File->open_store($dir);
+    $rs = Yote::RecordStore->open_store($dir);
     $rs->lock;
 
     is ($@, undef, 'no error after rs lock');
@@ -644,7 +644,7 @@ sub test_use {
     is ( $rs->active_entry_count, 3, "3 active items in silos after delete" );
 
     ok ($rs->lock, "got lock");
-    is (flock( $rs->[Yote::RecordStore::File->LOCK_FH], LOCK_NB || LOCK_EX ), 0, 'unable to lock already locked fh' );
+    is (flock( $rs->[Yote::RecordStore->LOCK_FH], LOCK_NB || LOCK_EX ), 0, 'unable to lock already locked fh' );
     ok ($rs->unlock, "unlock");
 
     {
@@ -652,7 +652,7 @@ sub test_use {
         my $breakon = 'base';
         no strict 'refs';
         no warnings 'redefine';
-        local *Yote::RecordStore::File::_make_path = sub {
+        local *Yote::RecordStore::_make_path = sub {
             my ( $dir, $err, $msg ) = @_;
             if ( $msg eq $breakon ) {
                 $$err = [{$dir => "monkeypatch $msg"}];
@@ -661,10 +661,10 @@ sub test_use {
             make_path( $dir, { error => $err } );
         };
 
-        failnice (sub{Yote::RecordStore::File->open_store($trydir)},
+        failnice (sub{Yote::RecordStore->open_store($trydir)},
                   'monkeypatch base', 'no base dir' );
         $breakon = 'silo';
-        failnice (sub{Yote::RecordStore::File->open_store($trydir)},
+        failnice (sub{Yote::RecordStore->open_store($trydir)},
                   'monkeypatch silo', 'no silo dir' );
     }
 
@@ -672,24 +672,24 @@ sub test_use {
         my $breakon = 'index_silo';
         no strict 'refs';
         no warnings 'redefine';
-        local *Yote::RecordStore::File::_open_silo = sub {
+        local *Yote::RecordStore::_open_silo = sub {
             my ($self, $silo_file, $template, $size, $max_file_size ) = @_;
             if ($silo_file =~ qr/${breakon}$/) {
                 die "monkeypatch $breakon";
             }
-            return Yote::RecordStore::File::Silo->open_silo( $silo_file,
+            return Yote::RecordStore::Silo->open_silo( $silo_file,
                                                              $template,
                                                              $size,
                                                              $max_file_size );
         };
 
-        failnice (sub{Yote::RecordStore::File->open_store($dir)}, 'monkeypatch index_silo', 'no index silo' );
+        failnice (sub{Yote::RecordStore->open_store($dir)}, 'monkeypatch index_silo', 'no index silo' );
 
         $breakon = 'transaction_index_silo';
-        failnice (sub {Yote::RecordStore::File->open_store($dir)}, 'monkeypatch transaction_index_silo', 'no transaction index silo' );
+        failnice (sub {Yote::RecordStore->open_store($dir)}, 'monkeypatch transaction_index_silo', 'no transaction index silo' );
 
         $breakon = '12';
-        failnice (sub {Yote::RecordStore::File->open_store($dir)}, 'monkeypatch 12', 'no data silo' );
+        failnice (sub {Yote::RecordStore->open_store($dir)}, 'monkeypatch 12', 'no data silo' );
     }
 
 
@@ -698,21 +698,21 @@ sub test_use {
 
         no strict 'refs';
         no warnings 'redefine';
-        local *Yote::RecordStore::File::_openhandle = sub {
+        local *Yote::RecordStore::_openhandle = sub {
             warn "monkeypatch _openhandle";
             return undef;
         };
 
         warnnice (sub{$rs->lock}, 1, 'monkeypatch _openhandle', "got lock with filehandle closed");
-        is (flock( $rs->[Yote::RecordStore::File->LOCK_FH], LOCK_NB || LOCK_EX ), 0, 'unable to lock already locked fh filehandle closed' );
+        is (flock( $rs->[Yote::RecordStore->LOCK_FH], LOCK_NB || LOCK_EX ), 0, 'unable to lock already locked fh filehandle closed' );
         ok ($rs->unlock, "unlock filehandle");
         unlink "$dir/LOCK";
         warnnice( sub{$rs->lock}, 1, 'monkeypatch _openhandle', "got lock with filehandle closed and lockfile removed");
 
         ok (-e "$dir/LOCK", "lock file regenerated");
-        is (flock( $rs->[Yote::RecordStore::File->LOCK_FH], LOCK_NB || LOCK_EX ), 0, 'unable to lock already locked fh filehandle closed' );
+        is (flock( $rs->[Yote::RecordStore->LOCK_FH], LOCK_NB || LOCK_EX ), 0, 'unable to lock already locked fh filehandle closed' );
         ok ($rs->unlock, "unlock filehandle");
-        local *Yote::RecordStore::File::_open = sub {
+        local *Yote::RecordStore::_open = sub {
             $@ = 'monkeypatch _open ';
             return undef;
         };
@@ -727,7 +727,7 @@ sub test_use {
         no strict 'refs';
         no warnings 'redefine';
         my $fail = 1;
-        local *Yote::RecordStore::File::_flock = sub {
+        local *Yote::RecordStore::_flock = sub {
             my ($fh, $flags) = @_;
             if (++$fail) {
                 $@ = "monkeypatch flock";
@@ -744,23 +744,23 @@ sub test_use {
                   'lock fail due to monkeypatch');
 
         $dir = tempdir( CLEANUP => 1 );
-        failnice(sub{Yote::RecordStore::File->open_store($dir)},
+        failnice(sub{Yote::RecordStore->open_store($dir)},
                  'unable to lock',
                  'bad flock cant open' );
         $fail = -1;
-        failnice(sub{Yote::RecordStore::File->open_store($dir)},
+        failnice(sub{Yote::RecordStore->open_store($dir)},
                  'unable to unlock',
                  'bad flock cant open' );
     }
 
     $dir = tempdir( CLEANUP => 1 );
-    $rs = Yote::RecordStore::File->open_store("$dir/deeper");
+    $rs = Yote::RecordStore->open_store("$dir/deeper");
     ok ($rs, 'make record store in non existing directory' );
 
     open my $in, '>', "$dir/deeper/VERSION";
     print $in "5.0";
     close $in;
-    failnice( sub{Yote::RecordStore::File->open_store("$dir/deeper")},
+    failnice( sub{Yote::RecordStore->open_store("$dir/deeper")},
               'Cannot open recordstore.*with version 5.0',
               'no opening previous version error msg');
     {
@@ -768,7 +768,7 @@ sub test_use {
         my $old_open = *CORE::open;
         no strict 'refs';
         no warnings 'redefine';
-        local *Yote::RecordStore::File::_open = sub {
+        local *Yote::RecordStore::_open = sub {
             my ($file) = @_;
             if ($file =~ /LOCK$/) {
                 $@ = 'monkeypatch';
@@ -782,13 +782,13 @@ sub test_use {
             return $fh;
         };
         $dir = tempdir( CLEANUP => 1 );
-        failnice( sub{Yote::RecordStore::File->open_store("$dir/deeper")},
+        failnice( sub{Yote::RecordStore->open_store("$dir/deeper")},
                   'Error opening lockfile.*monkeypatch',
                   'make record store fail on lock' );
     }
     {
         $dir = tempdir( CLEANUP => 1 );
-        $rs = Yote::RecordStore::File->open_store($dir);
+        $rs = Yote::RecordStore->open_store($dir);
         $rs->lock;
 
         is ($rs->stow( "BOOPO" ), 1, "first record again" );
@@ -800,7 +800,7 @@ sub test_use {
 
         no strict 'refs';
         no warnings 'redefine';
-        local *Yote::RecordStore::File::Silo::put_record = sub {
+        local *Yote::RecordStore::Silo::put_record = sub {
             die 'monkeypatch put';
         };
         failnice (sub{$rs->stow("NYET")},
@@ -826,8 +826,8 @@ sub locks {
 
 sub test_transactions {
     my $dir = tempdir( CLEANUP => 1 );
-    my $rs = Yote::RecordStore::File->open_store($dir);
-    my $copy = Yote::RecordStore::File->open_store( $dir );
+    my $rs = Yote::RecordStore->open_store($dir);
+    my $copy = Yote::RecordStore->open_store( $dir );
 
     locks ($copy);
     ok (!$@, 'no error after copy lock');
@@ -838,10 +838,10 @@ sub test_transactions {
     my $oid = $copy->stow( "OMETHING ELSE" );
     ok (!$@, 'no error after copy stow 2');
     is ( $oid, 2, "second id" );
-    ok( ! Yote::RecordStore::File->can_lock( $dir ), 'unable to lock directory while copy locks it' );
+    ok( ! Yote::RecordStore->can_lock( $dir ), 'unable to lock directory while copy locks it' );
 
     unlocks ($copy);
-    ok( Yote::RecordStore::File->can_lock( $dir ), 'now can lock directory since copy unlocked it' );
+    ok( Yote::RecordStore->can_lock( $dir ), 'now can lock directory since copy unlocked it' );
 
     locks ($rs);
     ok (!$@, 'no error after lock');
@@ -879,12 +879,12 @@ sub test_transactions {
               'may not unlock with a pending',
               'cant unlock store with active transaction' );
 
-    ok( ! Yote::RecordStore::File->can_lock( $dir ), 'rs is locked' );
+    ok( ! Yote::RecordStore->can_lock( $dir ), 'rs is locked' );
 
     close $rs->[$rs->LOCK_FH];
     $rs->[$rs->IS_LOCKED] = 0;
 
-    ok( Yote::RecordStore::File->can_lock( $dir ), 'rs not locked' );
+    ok( Yote::RecordStore->can_lock( $dir ), 'rs not locked' );
 
     # see that there is one transaction that needs fixing
     my $trans_silo = $copy->transaction_silo;
@@ -946,7 +946,7 @@ sub test_transactions {
 
     {
         $dir = tempdir( CLEANUP => 1 );
-        my $store = Yote::RecordStore::File->open_store( $dir );
+        my $store = Yote::RecordStore->open_store( $dir );
 
         locks $store;
 
@@ -970,7 +970,7 @@ sub test_transactions {
             # vacate is called in commit
             no strict 'refs';
             no warnings 'redefine';
-            local *Yote::RecordStore::File::_vacate = sub {
+            local *Yote::RecordStore::_vacate = sub {
                 die "monkeywrench";
             };
 
@@ -1004,7 +1004,7 @@ sub test_transactions {
     # test some transaction fails
     {
         $dir = tempdir( CLEANUP => 1 );
-        my $store = Yote::RecordStore::File->open_store( $dir );
+        my $store = Yote::RecordStore->open_store( $dir );
 
         locks ($store);
 
@@ -1053,7 +1053,7 @@ sub test_transactions {
     {
         $dir = tempdir( CLEANUP => 1 );
 
-        my $rs = Yote::RecordStore::File->open_store( $dir );
+        my $rs = Yote::RecordStore->open_store( $dir );
 
         my $silo = $rs->silos->[12];
         is ($silo->entry_count, 0, 'silo starts off empty' );
@@ -1096,7 +1096,7 @@ sub test_transactions {
     # test commit transaction fail
     {
         $dir = tempdir( CLEANUP => 1 );
-        my $store = Yote::RecordStore::File->open_store( $dir );
+        my $store = Yote::RecordStore->open_store( $dir );
 
         locks ($store);
 
@@ -1123,7 +1123,7 @@ sub test_transactions {
         my $t = 0;
 
         {
-            local *Yote::RecordStore::File::Silo::put_record = sub {
+            local *Yote::RecordStore::Silo::put_record = sub {
                 if ($t++ > 1) {
                     die 'monkey';
                 }
@@ -1139,7 +1139,7 @@ sub test_transactions {
 
     {
         $dir = tempdir( CLEANUP => 1 );
-        my $store = Yote::RecordStore::File->open_store( $dir );
+        my $store = Yote::RecordStore->open_store( $dir );
         my $silo = $store->silos->[12];
         my $isilo = $store->index_silo;
 
@@ -1181,7 +1181,7 @@ print STDERR Data::Dumper->Dump(["A"]);
     # use for record
     {
         $dir = tempdir( CLEANUP => 1 );
-        my $store = Yote::RecordStore::File->open_store( $dir );
+        my $store = Yote::RecordStore->open_store( $dir );
         my $silo = $store->silos->[12];
         my $tsilo = $store->transaction_silo;
         my $isilo = $store->index_silo;
@@ -1192,7 +1192,7 @@ print STDERR Data::Dumper->Dump(["B"]);
         {
             no warnings 'redefine';
             no strict 'refs';
-            local *Yote::RecordStore::File::Silo::put_record = sub {
+            local *Yote::RecordStore::Silo::put_record = sub {
                 my $self = shift;
                 my( $id, $data, $template, $offset ) = @_;
                 if (compare_arrays( $data, $failid)) {
@@ -1246,7 +1246,7 @@ print STDERR Data::Dumper->Dump(["B"]);
 
     {
         $dir = tempdir( CLEANUP => 1 );
-        my $store = Yote::RecordStore::File->open_store( $dir );
+        my $store = Yote::RecordStore->open_store( $dir );
         locks ($store);
         my $silo = $store->silos->[12];
         my $bigsilo = $store->silos->[13];
@@ -1273,7 +1273,7 @@ print STDERR Data::Dumper->Dump(["B"]);
 
     {
         $dir = tempdir( CLEANUP => 1 );
-        my $store = Yote::RecordStore::File->open_store( $dir );
+        my $store = Yote::RecordStore->open_store( $dir );
         locks ($store);
         my $silo = $store->silos->[12];
         my $bigsilo = $store->silos->[13];
@@ -1299,7 +1299,7 @@ sub compare_arrays {
 sub test_sillystrings {
 
     my $dir = tempdir( CLEANUP => 1 );
-    my $store = Yote::RecordStore::File->open_store( $dir );
+    my $store = Yote::RecordStore->open_store( $dir );
     locks $store;
     my $packed = pack( "I*", (0..100) );
     is ( $store->stow( $packed ), 1, "id 1 for stowing silly" );
@@ -1310,7 +1310,7 @@ sub test_sillystrings {
 
 sub test_meta {
     my $dir = tempdir( CLEANUP => 1 );
-    my $store = Yote::RecordStore::File->open_store( $dir );
+    my $store = Yote::RecordStore->open_store( $dir );
 
     locks $store;
 
@@ -1324,7 +1324,7 @@ sub test_meta {
 
         my $t = 0;
 
-        local *Yote::RecordStore::File::_time = sub {
+        local *Yote::RecordStore::_time = sub {
             $t;
         };
 
@@ -1354,13 +1354,13 @@ sub new { return bless {}, shift }
 
 sub new_rs {
     my $dir = tempdir( CLEANUP => 1 );
-    my $store = Yote::RecordStore::File->open_store($dir);
+    my $store = Yote::RecordStore->open_store($dir);
 
     return $store;
 }
 sub reopen {
     my( $cls, $oldstore ) = @_;
-    return Yote::RecordStore::File->open_store( $oldstore->[Yote::RecordStore::File->DIRECTORY] );
+    return Yote::RecordStore->open_store( $oldstore->[Yote::RecordStore->DIRECTORY] );
 }
 
 __END__
