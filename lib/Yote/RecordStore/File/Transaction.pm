@@ -41,8 +41,8 @@ use constant {
 # if an entry is stowed, then deleted, then stowed again, only        #
 # the most recent action is recorded. The stack silo contains the     #
 # id, the state, the original silo id (if there is one ),             #
-# the original idx in the silo (if there is one ), the silo id that   #
-# the transaction stored data in, the idx in the silo that the        #
+# the original id in the silo (if there is one ), the silo id that   #
+# the transaction stored data in, the id in the silo that the        #
 # the transaction stored data in                                      #
 #                                                                     #
 # When fetch is used from a transaction, the stack silo is checked    #
@@ -52,81 +52,141 @@ use constant {
 
 
 sub create {
-    my( $cls, $store, $dir, $id ) = @_;
+    my( $cls, $store ) = @_;
 
-    # stack of id used
-    my $stack_silo_dir = "$dir/stack_silo";
-    make_path( $stack_silo_dir, { error => \my $err } );
-    if( @$err ) { die join( ", ", map { values %$_ } @$err ) }
-
-    my $stack_silo = Yote::RecordStore::File::Silo->open_silo(
-        $stack_silo_dir,
-        'ILILIL', # action, id, trans silo id, trans id in silo, orig silo id, orig id in silo
-        0,
-        $store->max_file_size );
-
+    my $trans_id = $store->[$store->TRANSACTION_INDEX_SILO]->push( [TR_ACTIVE, 0] );
     return bless {
-        directory  => $dir,
-        id         => $id,
-        stack_silo => $stack_silo,
-        changes => {},
-        store      => $store,
-        state      => TR_ACTIVE,
+        state        => TR_ACTIVE,
+        store        => $store,
+        trans_id     => $trans_id,
+        updates      => {},
     }, $cls;
 
 } #create
+
+sub _err {
+    my ($method,$txt) = @_;
+    $@ = __PACKAGE__."::$method $txt";
+}
+
+sub open {
+    my( $cls, $store, $trans_id ) = @_;
+
+    my ($trans_state, $trans_obj_id) = @{$store->[$store->TRANSACTION_INDEX_SILO]->get_record( $trans_id ) || []};
+;
+
+    unless ($trans_obj_id) {
+        _err( 'open', 'no transaction object was recorded' );
+        return undef;
+    }
+
+    my $update_data = $store->_fetch( $trans_obj_id );
+    my (@update_all) = unpack "I*", $update_data;
+    my $updates = {};
+    while (@update_all) {
+        my ($status,$id,$orig_silo_id,$orig_id_in_silo,$trans_silo_id,$trans_id_in_silo) =  splice @update_all, 0, 6;
+        $updates->{$id} = [$status,$id,$orig_silo_id,$orig_id_in_silo,$trans_silo_id,$trans_id_in_silo];
+    }
+    
+
+    return bless {
+        state        => $trans_state,
+        store        => $store,
+        trans_obj_id => $trans_obj_id,
+        trans_id     => $trans_id,
+        updates      => $updates,
+    }, $cls;
+}
+
 
 sub commit {
     my $self = shift;
 
     my $store = $self->{store};
 
-    unless ($store->transaction_silo->put_record( $self->{id}, [TR_IN_COMMIT], 'I' )) {
+    my $updates = $self->{updates};
+    my @update_ids = keys %$updates;
+
+    my $trans_obj_template = "IIIIII" x @update_ids; 
+
+    my $trans_obj_id = $store->_stow( pack( $trans_obj_template, map { @$_ } values %$updates) );
+
+    # mark transaction as in commit
+    unless ($store->transaction_silo->put_record( $self->{trans_id}, [TR_IN_COMMIT, $trans_obj_id] )) {
         return undef;
     }
+
     $self->{state} = TR_IN_COMMIT;
 
     my $store_index = $store->index_silo;
     my $store_silos = $store->silos;
-
-    my $stack_silo = $self->{stack_silo};
-    my $changes = $self->{changes};
-    for my $id (sort { $a <=> $b } keys %$changes) {
-        my( $action, $rec_id, $orig_silo_id, $orig_idx_in_silo, $trans_silo_id, $trans_id_in_silo ) = @{$changes->{$id}};
+    #
+    # first update the index
+    # 
+    for my $id (@update_ids) {
+        my( $action, $rec_id, $orig_silo_id, $orig_id_in_silo, $trans_silo_id, $trans_id_in_silo ) = @{$updates->{$id}};
         if( $action == RS_ACTIVE ) {
-            unless ($store_silos->[$trans_silo_id]->put_record( $trans_id_in_silo, [ RS_ACTIVE ], 'I' )) {
-                return undef;
-            }
-            unless ($store_index->put_record( $rec_id, [$trans_silo_id,$trans_id_in_silo,time] )) {
+            # create or update
+            unless ($store_index->put_record( $rec_id, [$trans_silo_id,$trans_id_in_silo], 'IL' )) {
                 return undef;
             }
         }
         else {
-            my $rec = $store_index->get_record( $rec_id );
-            unless ($rec) {
-                $@ = "commit - record $rec_id  not found. aborting commit";
-                return undef;
-            }
-            my( $s_id, $id_in_s ) = @$rec;
-            if( $s_id ) {
-                unless ($store->silos->[$s_id]->put_record( $id_in_s, [RS_DEAD], 'I' )) {
-                    return undef;
-                }
-            }
-            unless ($store_index->put_record( $rec_id, [0,0,time] )) {
+            # remove
+            unless ($store_index->put_record( $rec_id, [0,0], 'IL' )) {
                 return undef;
             }
         }
     }
-    unless ($store->transaction_silo->put_record( $self->{id}, [TR_COMPLETE], 'I' )) {
+
+
+    #
+    # now update the data silo records to make these active
+    # 
+    for my $id (@update_ids) {
+        my( $action, $rec_id, $orig_silo_id, $orig_id_in_silo, $trans_silo_id, $trans_id_in_silo ) = @{$updates->{$id}};
+        if( $action == RS_ACTIVE ) {
+            # create or update
+            unless ($store_silos->[$trans_silo_id]->put_record( $trans_id_in_silo, [ RS_ACTIVE ], 'I' )) {
+                return undef;
+            }
+        }
+        else {
+            # remove
+            if ($orig_silo_id) {
+                # if it existed, mark it as dead in the data silo
+                unless ($store->silos->[$orig_silo_id]->put_record( $orig_id_in_silo, [RS_DEAD], 'I' )) {
+                    return undef;
+                }
+            }
+        }
+    }
+
+    #
+    # Now mark the transaction as complete
+    #
+    unless ($store->transaction_silo->put_record( $self->{trans_id}, [TR_COMPLETE], 'I' )) {
         return undef;
     }
 
+    # mark the trans object as dead
+    my( $trans_obj_silo_id, $trans_obj_id_in_silo ) = @{$store->[$store->INDEX_SILO]->get_record($trans_obj_id)};
+    $store->silos->[$trans_obj_silo_id]->put_record( $trans_obj_id_in_silo, [RS_DEAD], 'I' );
+
+    # vacate the trans_obj_id
+    $store->_vacate( $trans_obj_silo_id, $trans_obj_id_in_silo );
+
     # this is sort of linting. The transaction is complete, but this cleans up any records marked deleted.
-    for my $id (sort { $a <=> $b } keys %$changes) {
-        my( $action, $rec_id, $orig_silo_id, $orig_idx_in_silo ) = @{$changes->{$id}};
-        if( $action == RS_DEAD && $orig_silo_id ) {
-            $store->_vacate( $orig_silo_id, $orig_idx_in_silo );
+
+    my @update_blocks =
+               sort { $b->[3] <=> $a->[3] }
+               map { $updates->{$_} }
+               @update_ids;
+
+    for my $block (@update_blocks) {
+        my( $action, $rec_id, $orig_silo_id, $orig_id_in_silo ) = @$block;
+        if( $orig_silo_id ) {
+           $store->_vacate( $orig_silo_id, $orig_id_in_silo );
         }
     }
     return 1;
@@ -134,7 +194,6 @@ sub commit {
 
 sub rollback {
     my $self = shift;
-
     my $store = $self->{store};
     my $index = $store->index_silo;
 
@@ -144,16 +203,25 @@ sub rollback {
     # [RS_ACTIVE, $id, $orig_silo_id, $orig_id_in_silo, $trans_silo_id, $trans_id_in_silo];
     # [RS_DEAD  , $id, $orig_silo_id, $orig_id_in_silo, 0, 0];
     
-    # go and mark dead any temporary stows
-    my $stack_silo = $self->{stack_silo};
-    my $count = $stack_silo->entry_count;
+    my $updates = $self->{updates};
+    my @update_ids = keys %$updates;
 
-    # go backwards to remove items that may have been partially created.
-    for my $stack_id (reverse(1..$count)) {
-        my( $action, $rec_id, $orig_silo_id, $id_in_orig_silo, $trans_silo_id, $trans_id_in_silo ) = @{$stack_silo->get_record( $stack_id )};
+    # must be sorted so that the ones on the ends of the silos get removed first
+    # otherwise, an earlier can try to swap out with a later one and the later one wont move
+    my @sorted_update_blocks = 
+        sort { $b->[5] <=> $a->[5] }
+        map { $updates->{$_} } 
+        keys %$updates;
+
+    for my $block (@sorted_update_blocks) {
+        my( $action, $rec_id, $orig_silo_id, $id_in_orig_silo, $trans_silo_id, $trans_id_in_silo ) = @$block;
+
+#    for my $id (@update_ids) {
+#        print STDERR "ROLLBACK $id\n";
+#        my( $action, $rec_id, $orig_silo_id, $id_in_orig_silo, $trans_silo_id, $trans_id_in_silo ) = @{$updates->{$id}};
         my( $reported_silo_id, $id_reported_silo ) = @{$index->get_record( $rec_id )};
         if( $reported_silo_id != $orig_silo_id || $id_reported_silo != $id_in_orig_silo ) {
-            $index->put_record( $rec_id, [$orig_silo_id,$id_in_orig_silo,time] );
+            $index->put_record( $rec_id, [$orig_silo_id,$id_in_orig_silo], "IL" );            
         }
         if( $trans_silo_id ) {
             $store->_vacate( $trans_silo_id, $trans_id_in_silo );
@@ -161,6 +229,8 @@ sub rollback {
     }
 
     $store->transaction_silo->put_record( $self->{id}, [TR_COMPLETE], 'I' );
+    $self->{state} = TR_COMPLETE;
+    return 1;
 } #rollback
 
 sub fetch {
@@ -168,8 +238,8 @@ sub fetch {
 
     my $store = $self->{store};
 
-    my $changes = $self->{changes};
-    if( my $rec = $changes->{$id} ) {
+    my $updates = $self->{updates};
+    if( my $rec = $updates->{$id} ) {
         my( $action, $rec_id, $a, $b, $trans_silo_id, $trans_id_in_silo ) = @$rec;    
         if( $action == RS_ACTIVE ) {
             my $ret = $store->silos->[$trans_silo_id]->get_record( $trans_id_in_silo );
@@ -177,8 +247,16 @@ sub fetch {
         }
         return undef;
     }
-    return $store->fetch( $id, 'no-trans' );
+    return $store->_fetch( $id );
 } #fetch
+
+sub fix {
+    my $self = shift;
+    my $trans_state = $self->{state};
+    if ($trans_state != TR_COMPLETE) {
+        $self->rollback;
+    }
+}
 
 #####################################################################################################################
 # given data and id,                                                                                                #
@@ -191,59 +269,44 @@ sub fetch {
 #  push the new data value into the store silo with the new-silo-id from above                                      #
 #                                                                                                                   #
 #  sees if the id already has an entry in the stack silo                                                            #
-#     - if yes, it updates it to include STOW,id,new_silo_id,new_idx_in_silo,$original-silo-id,original-idx-in-silo #
-#     - if no, pushes on to it to STOW,id,new_silo_id,new_idx_in_silo,$original-silo-id,original-idx-in-silo        #
+#     - if yes, it updates it to include STOW,id,new_silo_id,new_id_in_silo,$original-silo-id,original-id-in-silo   #
+#     - if no, pushes on to it to STOW,id,new_silo_id,new_id_in_silo,$original-silo-id,original-id-in-silo          #
 #####################################################################################################################
 sub stow {
-    my $self = $_[0];
-    my $id   = $_[2];
+    my ($self, $data, $id ) = @_;
 
     my $store = $self->{store};
     if( $id == 0 ) {
         $id = $store->next_id;
     }
 
-    my $data_write_size = do { use bytes; length( $_[1] ) };
-    my $trans_silo_id = $store->silo_id_for_size( $data_write_size );
+    my $data_write_size = do { use bytes; length( $data ) };
+    my $trans_silo_id = $store->_silo_id_for_size( $data_write_size );
 
     my $trans_silo = $store->silos->[$trans_silo_id];
     my( $orig_silo_id, $orig_id_in_silo ) = @{$store->index_silo->get_record($id)};
-    my $trans_id_in_silo = $trans_silo->push( [RS_IN_TRANSACTION, $id, $data_write_size, $_[1]] );
+    my $trans_id_in_silo = $trans_silo->push( [RS_IN_TRANSACTION, $id, $data_write_size, $data] );
 
-    my $stack_silo = $self->{stack_silo};
-    my $changes = $self->{changes};
-    # if( my $rec = $changes->{$id} ) {
-    #     my( $action, $rec_id, $a, $b, $old_trans_silo_id, $old_idx_in_trans_silo ) = @$rec;
-    #     if( $old_trans_silo_id ) {
-    #         my $old_trans_silo = $store->silos->[$old_trans_silo_id];
-    #         $old_trans_silo->put_record( $old_idx_in_trans_silo, [RS_DEAD], 'I' );
-    #     }
-    # }
     my $update = [RS_ACTIVE,$id,$orig_silo_id,$orig_id_in_silo,$trans_silo_id,$trans_id_in_silo];
-    $changes->{$id} = $update;
-    $stack_silo->push( $update );
+    $self->{updates}{$id} = $update;
+
     return $id;
 } #stow
 
 sub delete_record {
     my( $self, $id ) = @_;
     
+    delete $self->{updates}{$id};
+
     my( $orig_silo_id, $orig_id_in_silo ) = @{$self->{store}->index_silo->get_record($id)};
+    unless ($orig_silo_id) {
+        return undef;
+    }
     
-    my $stack_silo = $self->{stack_silo};
-    my $changes = $self->{changes};
-
-#    if( my $rec = $changes->{$id} ) {
-#        my( $action, $rec_id, $a, $b, $old_trans_silo_id, $old_idx_in_trans_silo ) = @$rec;
-#        if( $old_trans_silo_id ) {
-#            my $old_trans_silo = $self->{store}->silos->[$old_trans_silo_id];
-#            $old_trans_silo->put_record( $old_idx_in_trans_silo, [RS_DEAD], 'I' );
-#        }
-#    }
     my $update = [RS_DEAD,$id,$orig_silo_id,$orig_id_in_silo,0,0];
-    $changes->{$id} = $update;
-    $stack_silo->push( $update );
+    $self->{updates}{$id} = $update;
 
+    return $id;
 } #delete_record
 
 "I think there comes a time when you start dropping expectations. Because the world doesn't owe you anything, and you don't owe the world anything in return. Things, feelings, are a very simple transaction. If you get it, be grateful. If you don't, be alright with it. - Fawad Khan";

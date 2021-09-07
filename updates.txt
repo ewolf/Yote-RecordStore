@@ -1,3 +1,141 @@
+
+
+big bad error... sometimes fails
+  ok 229 - rec 4
+  ok 230 - rec 5
+  ok 231 - silo now with 2 items
+  1..231
+
+  ROLLBACK 4
+  ROLLBACK 2
+  ROLLBACK 3
+  ok 231 - silo now with 2 items
+
+  ROLLBACK 4
+  ROLLBACK 3
+  ROLLBACK 2
+  ok 231 - silo now with 2 items
+
+
+  ROLLBACK 3
+  ROLLBACK 4
+  ROLLBACK 2
+  ok 231 - silo now with 2 items
+
+ROLLBACK 3
+ROLLBACK 2
+ROLLBACK 4
+not ok 231 - silo now with 2 items
+#   Failed test 'silo now with 2 items'
+#   at t/recordstore.t line 116.
+#          got: '3'
+#     expected: '2'
+1..231
+
+  ok 226 - rec 1
+  ok 227 - rec 2
+  ok 228 - rec 3
+  ok 229 - rec 4
+  ok 230 - rec 5
+  ROLLBACK 3
+  ROLLBACK 2
+  ROLLBACK 4
+  not ok 231 - silo now with 2 items
+  #   Failed test 'silo now with 2 items'
+  #   at t/recordstore.t line 115.
+  #          got: '3'
+  #     expected: '2'
+  1..231
+  # Looks like you failed 1 test of 231.
+
+ ROLLBACK 2
+ ROLLBACK 3
+ ROLLBACK 4
+ not ok 231 - silo now with 2 items
+ #   Failed test 'silo now with 2 items'
+ #   at t/recordstore.t line 116.
+ #          got: '3'
+ #     expected: '2'
+ 1..231
+
+
 9/6/21 ---------------
 
 for the indexes, restored the META data, at least the creation and last updated time
+
+-----------------------------------------------------------------------------------
+RecordStore API and use
+
+- constructor
+
+  open_store
+
+    now, calling this will lock things during the construction but unlock
+    them before returning. Since locks are not supposed to last that long.
+    decided *not* to add something like 'lock_if_able' and just roll with it.
+    
+- locking functions
+    > propose: only one store may be open at a time, so to use any of the
+      informational methods, the store must be locked.
+
+  lock
+     where open locks things, resets silo counds and makes sure the 
+     transactions are in a good state
+
+  unlock
+     unlocks things. fails if not locked.
+     failes if there is an active transaction
+
+- main data functions
+
+   next_id 
+   first_id 
+   fetch 
+   fetch_meta 
+   stow 
+   delete_record 
+
+- transaction functions
+
+   use_transaction 
+   commit_transaction 
+   cancel_transaction 
+
+- informational methods
+
+   directory
+
+   record_count
+   silos_entry_count 
+
+   is_locked
+   can_lock
+
+   index_silo
+   silos
+   transaction_silo
+
+
+- "private methods"
+
+   reset {
+
+   active_entry_count {
+   detect_version {
+   silo_id_for_size {
+
+   fix_transactions {
+
+  _vacate 
+
+- method for transaction to call
+  _stow (since 'stow' has a transaction behavior that shouldn't be recursive)
+
+- methods for testing override
+
+  _open 
+  _open_silo
+  _flock
+  _openhandle 
+  _make_path 
+

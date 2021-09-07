@@ -17,8 +17,6 @@ use forker;
 use lib './lib';
 use Yote::RecordStore::File::Silo;
 
-my $is_root = `whoami` =~ /root/;
-
 # -----------------------------------------------------
 #               init
 # -----------------------------------------------------
@@ -32,10 +30,7 @@ exit( 0 );
 
 sub failnice {
     my( $subr, $errm, $msg ) = @_;
-    eval {
-        $subr->();
-        fail( $msg );
-    };
+    is ($subr->(), undef, $msg );
     like( $@, qr/$errm/, "$msg error" );
     undef $@;
 }
@@ -73,12 +68,24 @@ sub test_init {
     is( $silo->record_size, 12, "silo has 32 bytes per record" );
     is( $silo->records_per_subsilo, 166_666_666, "166,666,666 records per file" );
 
-    if( ! $is_root ) {
+    {
+        no strict 'refs';
+        no warnings 'redefine';
+
         $dir = tempdir( CLEANUP => 1 );
-        chmod 0444, $dir;
         my $cantdir = "$dir/cant";
+
+        local *Yote::RecordStore::File::Silo::_make_path = sub {
+            my ($dir,$err) = @_;
+            if ($dir =~ /cant$/) {
+                $$err = [$dir];
+                return undef;
+            }
+            make_path( $dir, { error => \$err } );
+        };
+
         failnice( sub { Yote::RecordStore::File::Silo->open_silo( $cantdir, 'LL' ) },
-                  "Permission denied",
+                  "unable to make",
                   'was able to init a silo in an unwritable directory' );
      }
     $Yote::RecordStore::File::Silo::DEFAULT_MAX_FILE_SIZE = 2_000_000_000;
@@ -180,24 +187,35 @@ sub test_use {
     is ($silo->put_record( 5, "WRONG".('x'x$size) ), undef, 'put record too big' );
     like( $@, qr/too large/, 'error message for too big data' );
 
-    unless( $is_root ) {
+    {
+
         $silo = Yote::RecordStore::File::Silo->open_silo( $dir, 'Z*', $size, $size * 10 );
-        chmod 0000, "$dir";
-        eval {
-            $silo->subsilos;
-            fail( "Was able to access subsilos despite dark directory" );
-        };
-        like( $@, qr/can't open/, 'error msg for dark dir' );
-        chmod 0777, "$dir";
+
+        {
+            no strict 'refs';
+            no warnings 'redefine';
+            local *Yote::RecordStore::File::Silo::_opensilosdir = sub {
+                $@ = 'monkeypatch';
+                return undef;
+            };
+            
+            failnice( sub { $silo->subsilos },
+                      "unable to open subsilo directory $dir.*monkey",
+                      "Was able to access subsilos despite dark directory",
+                );
+        }
+
+
         is_deeply( [$silo->subsilos], [ 0, 1,2,3], "still four subsilos after open" );
 
-        chmod 0444, "$dir/3";
-        eval {
-            $silo->peek;
-        };
-        like( $@, qr/Unable to open|Permission denied/, 'error msg for readonly file' );
-
-        chmod 0777, "$dir/3";
+        # {
+        #     chmod 0444, "$dir/3";
+        #     eval {
+        #         $silo->peek;
+        #     };
+        #     like( $@, qr/Unable to open|Permission denied/, 'error msg for readonly file' );
+        # }
+        # chmod 0777, "$dir/3";
 
         $silo->put_record(40,'LAST');
         is_deeply( $silo->peek, ['LAST'], 'last is last' );
@@ -217,41 +235,60 @@ sub test_use {
         $silo->put_record(1,'F');
         is_deeply( $silo->get_record(1), ['F'], 'f is first' );
 
-        
         $silo->empty_silo;
+
         is_deeply( [$silo->peek], [undef], 'nothing to peek at after empty silo' );
         is_deeply( [$silo->subsilos], [ 0], "empty only has first subsilo " );
+
+        is ($silo->entry_count, 0, 'no entries in emtpy' );
 
         open my $fh, '>', "$dir/3";
         print $fh '';
         close $fh;
-        eval {
-            $silo->ensure_entry_count( 40 );
-            fail( 'able to ensure count with wacky extra subsilo hanging out' );
-        };
+        failnice( sub { $silo->ensure_entry_count( 40 ) },
+                   '3 already exists',
+                   'able to ensure count with wacky extra subsilo 3 hanging out' );
+
+        is ($silo->entry_count, 0, 'still no entries in emtpy' );
+
         open $fh, '>', "$dir/2";
         print $fh '';
         close $fh;
-        eval {
-            $silo->ensure_entry_count( 40 );
-            fail( 'able to ensure count with wacky extra subsilos hanging out' );
-        };
+        failnice( sub { $silo->ensure_entry_count( 40 ) },
+                   '2 already exists',
+                   'able to ensure count with wacky extra subsilo 2 hanging out' );
+
+        is ($silo->entry_count, 0, 'even still no entries in emtpy' );
 
         $silo->empty_silo;
-        chmod 0444, "$dir/0";
-        eval {
-            $silo->ensure_entry_count( 3 );
-            fail( 'able to ensure count with unwriteable fi9rst' );
-        };
+
+        {
+            no strict 'refs';
+            no warnings 'redefine';
+            local *Yote::RecordStore::File::Silo::_open = sub {
+                my( $mod, $file) = @_;
+                if ($file eq "$dir/0") {
+                    $@ = 'monkeypatch';
+                    return undef;
+                }
+                open my ($fh), $mod, $file;
+                return $fh;
+            };
+
+            failnice( sub { $silo->ensure_entry_count( 40 ) },
+                      'unable to open.*monkey',
+                      'able to ensure count with wacky extra subsilo hanging out' );
+            # eval {
+            #     $silo->ensure_entry_count( 3 );
+            #     fail( 'able to ensure count with unwriteable first' );
+            # };
+        }
         
     }
 
     $silo->unlink_silo;
 
-    eval {
-        is_deeply( [$silo->subsilos], [], "no subsilos after unlink silo" );
-        fail( 'was able to call subsilos on this destroyed silo' );
-    };
+    is_deeply( [$silo->subsilos], [], "no subsilos after unlink silo" );
 
     $dir = tempdir( CLEANUP => 1 );
     $size = 2 ** 10;
@@ -343,6 +380,46 @@ sub test_use {
     $silo = Yote::RecordStore::File::Silo->open_silo( $dir, 'Z*', $size, $size * 10, );
     is ($silo->push( "WRONG".('x'x$size) ), undef, 'push record too big' );
     like( $@, qr/too large/, 'error message for too big data push' );
+
+    {
+        my $dir2 = tempdir( CLEANUP => 1 );
+        my $silo2 = Yote::RecordStore::File::Silo->open_silo( $dir2, 'Z*', $size, $size * 10, );
+        is ($silo2->push( "TEST" ), 1, "able to insert test" );
+        is_deeply( $silo2->get_record(1), ['TEST'], 'put record in simple silo' );
+
+        my $trip = 1;
+        no strict 'refs';
+        no warnings 'redefine';
+        local *Yote::RecordStore::File::Silo::_open = sub {
+            if ($trip++ > 0) {
+                $@ = 'monkeypatch';
+                return undef;
+            }
+            my( $mod, $file) = @_;
+            open my ($fh), $mod, $file;
+            return $fh;
+            
+        };
+        
+        failnice ( sub { $silo->empty_silo },
+                   'unable to reset.*monkey', 
+                   'unable to empty silo due to monkeypatch' );
+
+        $dir = tempdir( CLEANUP => 1 );
+        failnice( sub { $silo = Yote::RecordStore::File::Silo->open_silo( $dir, 'Z*', $size, $size * 10, ); },
+                  'unable to create silo data file',
+                  'file wont open so open_silo fails' );
+
+        failnice( sub { $silo2->get_record(1); },
+                  'Unable to open subsilo',
+                  'get record not able to open file' );
+
+        $trip = 0;
+        failnice( sub { $silo2->ensure_entry_count(10000); },
+                  'could not open file',
+                  'get record not able to open file' );
+    }
+
 
 } #test_use
 

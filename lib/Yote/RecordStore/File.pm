@@ -18,7 +18,10 @@ package Yote::RecordStore::File;
 
  use Yote::RecordStore::File;
 
- $store = Yote::RecordStore::File->init_store( DIRECTORY => $directory, MAX_FILE_SIZE => 20_000_000_000 );
+ $store = Yote::RecordStore::File->new( $directory );
+
+ $store->open;
+
  $data = "TEXT OR BYTES";
 
  # the first record id is 1
@@ -85,7 +88,7 @@ use constant {
     # array, and these are the indexes of
     # its components
     DIRECTORY              => 0,
-    ACTIVE_TRANS_FILE      => 1,
+
     MAX_FILE_SIZE          => 2,
     MIN_SILO_ID            => 3,
     INDEX_SILO             => 4,
@@ -96,6 +99,7 @@ use constant {
     LOCK_FH                => 9,
     LOCKS                  => 10,
     MAX_SILO_ID            => 11,
+    IS_LOCKED              => 12,
 
     # record state
     RS_ACTIVE         => 1,
@@ -109,6 +113,16 @@ use constant {
     TR_COMPLETE       => 4,
 };
 
+sub _err {
+    my ($method,$txt) = @_;
+    $@ = __PACKAGE__."::$method $txt";
+}
+
+sub _warn {
+    my ($method,$txt) = @_;
+    warn __PACKAGE__."::$method $txt";
+}
+
 =head2 open_store( options )
 
 Constructs a data store according to the options.
@@ -119,7 +133,11 @@ sub open_store {
     my( $cls, $dir ) = @_;
 
     unless( -d $dir ) {
-        _make_path( $dir, 'base' ) or return undef;
+        _make_path( $dir, \my $err, 'base' );
+        if ($err && @$err) {
+            _err( 'open_store', "unable to make base directory.". join( ", ", map { $_->{$dir} } @$err ) );
+            return undef;
+        }
     }
 
     my $max_file_size = $Yote::RecordStore::File::Silo::DEFAULT_MAX_FILE_SIZE;
@@ -135,10 +153,8 @@ sub open_store {
     my $lock_fh;
 
     my $silo_dir  = "$dir/data_silos";
-    my $lock_dir  = "$dir/user_locks";
-    my $trans_dir = "$dir/transactions";
     
-    $lock_fh = _open (-e $lockfile ? '+<' : '>', $lockfile);
+    $lock_fh = _open($lockfile);
     unless ($lock_fh) {
         $@ = "Error opening lockfile '$lockfile' : $@ $!";
         return undef;
@@ -162,29 +178,31 @@ sub open_store {
     }
     else {
         open my $vers_fh, '>', $vers_file;
-#        print STDERR "creating ".__PACKAGE__." version $VERSION\n";
         print $vers_fh "$VERSION\n";
         close $vers_fh;
     }
-    _make_path( $silo_dir, 'silo' ) or return undef;
-    _make_path( $lock_dir, 'lock' ) or return undef;
-    _make_path( $trans_dir, 'transaction' ) or return undef;
 
-    my $index_silo = $cls->open_silo( "$dir/index_silo",
+    _make_path( $silo_dir, \my $err, 'silo' );
+    if ($err && @$err) {
+        _err( 'open_store', "unable to make silo directory.". join( ", ", map { $_->{$silo_dir} } @$err ) );
+        return undef;
+    }
+
+    my $index_silo = $cls->_open_silo( "$dir/index_silo",
                                       "ILQQ"); #silo id, id in silo, last updated time, created time
         
 
     $index_silo || return undef;
 
-    my $transaction_index_silo = $cls->open_silo( "$dir/transaction_index_silo",
-                                                  "IQ" ); #state, time
+    my $transaction_index_silo = $cls->_open_silo( "$dir/transaction_index_silo",
+                                                  "IL" ); #state, trans id
 
     $transaction_index_silo || return undef;
 
     my $silos = [];
 
     for my $silo_id ($min_silo_id..$max_silo_id) {
-        my $silo = $silos->[$silo_id] = $cls->open_silo( "$silo_dir/$silo_id",
+        my $silo = $silos->[$silo_id] = $cls->_open_silo( "$silo_dir/$silo_id",
                                                          'ILLa*',  # status, id, data-length, data
                                                          2 ** $silo_id ); #size
         $silo || return undef;
@@ -195,7 +213,7 @@ sub open_store {
 
     my $store = bless [
         $dir,
-        "$dir/ACTIVE_TRANS",
+        undef,
         $max_file_size,
         $min_silo_id,
         $index_silo,
@@ -208,7 +226,7 @@ sub open_store {
         $max_silo_id,
     ], $cls;
 
-    $store->fix_transactions;
+    $store->_fix_transactions;
 
     _flock( $lock_fh, LOCK_UN );
 
@@ -216,8 +234,12 @@ sub open_store {
 } #open_store
 
 sub _open {
-    my( $mod, $file) = @_;
-    open my ($fh), $mod, $file;
+    my($file) = @_;
+    my $exists = -e $file;
+    open my ($fh), $exists ? '+<' : '>', $file;
+    unless ($exists) {
+        print $fh '';
+    }
     return $fh;
 }
 
@@ -235,57 +257,110 @@ sub directory {
     shift->[DIRECTORY];
 }
 
+sub is_locked {
+    my $self = shift;
+    return $self->[IS_LOCKED];
+}
+
+sub can_lock {
+    my ($pkg,$dir) = @_;
+    my $lockfile = "$dir/LOCK";
+    my $exists = -e $lockfile;
+    my $lock_fh = _openhandle( _open($lockfile) );
+    my $res = flock( $lock_fh, LOCK_EX | LOCK_NB );
+    if ($res) {
+        flock( $lock_fh, LOCK_UN | LOCK_NB );
+        return 1;
+    }
+    return 0;
+}
+
 sub lock {
     my $self = shift;
+
+    if ($self->[IS_LOCKED]) {
+        warn "Locking already locked";
+        return 1;
+    }
+
     unless (_openhandle( $self->[LOCK_FH] )) {
         my $lockfile = "$self->[DIRECTORY]/LOCK";
-        $self->[LOCK_FH] = _open ( -e $lockfile ? '+<' : '>', $lockfile );
-        $self->[LOCK_FH] || return undef;
+        $self->[LOCK_FH] = _open($lockfile);
+        unless ($self->[LOCK_FH]) {
+            return undef;
+        }
     }
-    _flock( $self->[LOCK_FH], LOCK_EX ) || return undef;
 
-    $self->fix_transactions;
-    $self->reset;
+    unless (_flock( $self->[LOCK_FH], LOCK_EX )) {
+        return undef;
+    }
+
+    $self->[IS_LOCKED] = 1;
+
+    $self->_reset;
 
     return 1;
 }
 
 sub unlock {
     my $self = shift;
+
+    unless ($self->[IS_LOCKED]) {
+        _err( 'unlock', "store not locked" );
+        return undef;
+    }
+
+    if ($self->[TRANSACTION]) {
+        _err( 'unlock', "may not unlock with a pending transaction, either commit it or roll it back" );
+        return undef;
+    }
+
+    $self->[IS_LOCKED] = 0;
     _flock( $self->[LOCK_FH], LOCK_UN ) || return undef;
     return 1;
 }
 
 sub fetch {
-    my( $self, $id, $no_trans ) = @_;
-    my $trans = $self->[TRANSACTION];
-    if( $trans && ! $no_trans ) {
-        if( $trans->{state} != TR_ACTIVE ) {
-            $@ = "Transaction is in a bad state. Cannot fetch";
-            return undef;
-        }
-        return $trans->fetch( $id );
-    }
+    my( $self, $id ) = @_;
 
-    if( $id > $self->record_count ) {
+    unless ($self->[IS_LOCKED]) {
+        _err( 'fetch', "record store not locked");
         return undef;
     }
 
+    my $trans = $self->[TRANSACTION];
+    if( $trans ) {
+        return $trans->fetch( $id );
+    }
+
+    $self->_fetch( $id );
+} #fetch
+
+sub _fetch {
+    my( $self, $id ) = @_;
+
+    if( $id > $self->record_count ) {
+        $@ = "fetch past end of records";
+        return undef;
+    }
     my( $silo_id, $id_in_silo, $update_time, $creation_time ) = @{$self->[INDEX_SILO]->get_record($id)};
     if( $silo_id ) {
         my $ret = $self->[SILOS]->[$silo_id]->get_record( $id_in_silo );
-#        print STDERR "FETCH $id ($silo_id/$id_in_silo) : ".substr( $ret->[3], 0, $ret->[2] > 100 ? 100 : $ret->[2] )."\n";
         return $update_time, $creation_time, substr( $ret->[3], 0, $ret->[2] );
     }
-#    print STDERR "FETCH $id (NULL)\n";
     return undef;
 } #fetch
 
 sub fetch_meta {
     my( $self, $id ) = @_;
 
+    unless ($self->[IS_LOCKED]) {
+        _err( 'fetch_meta', "record store not locked");
+        return undef;
+    }
+
     if( $id > $self->record_count ) {
-        
+        $@ = "fetch past end of records";        
         return undef;
     }
 
@@ -294,21 +369,33 @@ sub fetch_meta {
 } #fetch_meta
 
 sub stow {
-    my $self = $_[0];
-    my $id   = $_[2];
+    my ($self, $data, $id ) = @_;
+
+    unless ($self->[IS_LOCKED]) {
+        _err( 'stow', "record store not locked");
+        return undef;
+    }
 
     my $trans = $self->[TRANSACTION];
-    if( $trans ) {
-        return $trans->stow( $_[1], $id );
+    if ($trans) {
+        return $trans->stow( $data, $id );
     }
+
+    return $self->_stow( $data, $id );
+}
+
+sub _stow {
+    my ($self, $data, $id ) = @_;
 
     my $index = $self->[INDEX_SILO];
 
-    $index->ensure_entry_count( $id );
     if( defined $id && ($id < 1|| int($id) != $id)) {
-        $@ = "The id for ".__PACKAGE__."->stow must be a supplied as a positive integer";
+        _err( 'stow', "id when supplied must be a positive integer" );
         return undef;
     }
+
+    $index->ensure_entry_count( $id );
+
     my( $old_silo_id, $old_id_in_silo, $old_creation_time );
     if( $id > 0 ) {
        ( $old_silo_id, $old_id_in_silo, undef, $old_creation_time ) = @{$index->get_record($id)};
@@ -317,14 +404,13 @@ sub stow {
         $id = $index->next_id;
     }
 
-    my $data_write_size = do { use bytes; length $_[1] };
-    my $new_silo_id = $self->silo_id_for_size( $data_write_size );
+    my $data_write_size = do { use bytes; length $data };
+    my $new_silo_id = $self->_silo_id_for_size( $data_write_size );
     my $new_silo = $self->[SILOS][$new_silo_id];
 
-    my $new_id_in_silo = $new_silo->push( [RS_ACTIVE, $id, $data_write_size, $_[1]] );
+    my $new_id_in_silo = $new_silo->push( [RS_ACTIVE, $id, $data_write_size, $data] );
 
-#    print STDERR "WRITE $id ($new_silo_id/$new_id_in_silo) --> ".substr($_[1],0,100)."\n";
-    my $t = int(time * 1000);
+    my $t = _time();
 
     unless ($index->put_record( $id, [$new_silo_id,$new_id_in_silo, $t, $old_creation_time ? $old_creation_time : $t] )) {
         return undef;
@@ -338,7 +424,13 @@ sub stow {
 } #stow
 
 sub next_id {
-    return shift->[INDEX_SILO]->next_id;
+    my $self = shift;
+    unless ($self->[IS_LOCKED]) {
+        _err( 'next_id', "record store not locked");
+        return undef;
+    }
+
+    return $self->[INDEX_SILO]->next_id;
 } #next_id
 
 sub first_id {
@@ -347,17 +439,23 @@ sub first_id {
 
 sub delete_record {
     my( $self, $del_id ) = @_;
+
+    unless ($self->[IS_LOCKED]) {
+        _err( 'delete_record', "record store not locked");
+        return undef;
+    }
+
     my $trans = $self->[TRANSACTION];
     if( $trans ) {
         return $trans->delete_record( $del_id );
     }
 
     if( $del_id > $self->[INDEX_SILO]->entry_count ) {
-        warn "Tried to delete past end of records";
+        _err( 'delete_record', "Tried to delete past end of records" );
         return undef;
     }
     my( $old_silo_id, $old_id_in_silo ) = @{$self->[INDEX_SILO]->get_record($del_id)};
-    my $t = int(time * 1000);
+    my $t = _time();
     unless ($self->[INDEX_SILO]->put_record( $del_id, [0,0,$t,$t] )) {
         return undef;
     }
@@ -369,63 +467,62 @@ sub delete_record {
 
 
 sub use_transaction {
-return;
     my $self = shift;
+
+    unless ($self->[IS_LOCKED]) {
+        _err( 'use_transaction', "record store not locked");
+        return undef;
+    }
+
     if( $self->[TRANSACTION] ) {
         warn __PACKAGE__."->use_transaction : already in transaction";
         return $self->[TRANSACTION];
     }
-    my $tid = $self->[TRANSACTION_INDEX_SILO]->push( [TR_ACTIVE, int(time * 1000)] );
-    $self->unlock;
-    my $tdir = "$self->[DIRECTORY]/transactions/$tid";
-    make_path( $tdir, { error => \my $err } );
-    if( @$err ) { 
-        $@ = join( ", ", map { values %$_ } @$err );
-        return undef;
-    }
+    $self->[TRANSACTION] = Yote::RecordStore::File::Transaction->create( $self );
 
-    $self->[TRANSACTION] = Yote::RecordStore::File::Transaction->create( $self, $tdir, $tid );
     return $self->[TRANSACTION];
 } #use_transaction
 
 sub commit_transaction {
-return;
     my $self = shift;
-    my $trans = $self->[TRANSACTION];
-    unless( $trans ) {
-        $@ = __PACKAGE__."->commit_transaction : no transaction to commit";
+
+    unless ($self->[IS_LOCKED]) {
+        _err( 'commit_transaction', "record store not locked");
         return undef;
     }
-    my $trans_file = $self->[ACTIVE_TRANS_FILE];
-    open my $trans_fh, '>', $trans_file;
-    print $trans_fh " ";
-    close $trans_fh;
+
+    my $trans = $self->[TRANSACTION];
+
+    unless( $trans ) {
+        _err( 'commit_transaction',  'no transaction to commit' );
+        return undef;
+    }
 
     if ($trans->commit) {
-        delete $self->[TRANSACTION];
-        unlink $trans_file;
-        $self->unlock;
+        $self->[TRANSACTION] = undef;
         return 1;
     }
+
 } #commit_transaction
 
 sub rollback_transaction {
-return;
     my $self = shift;
-    my $trans = $self->[TRANSACTION];
-    unless( $trans ) {
-        $@ = __PACKAGE__."->rollback_transaction : no transaction to roll back";
+
+    unless ($self->[IS_LOCKED]) {
+        _err( 'rollback_transaction', "record store not locked");
         return undef;
     }
-    my $trans_file = $self->[ACTIVE_TRANS_FILE];
-    open my $trans_fh, '>', $trans_file;
-    print $trans_fh " ";
-    close $trans_fh;
-    $trans->rollback;
-    delete $self->[TRANSACTION];
-    unlink $trans_file;
-    $self->unlock;
-    return 1;
+
+
+    my $trans = $self->[TRANSACTION];
+    unless( $trans ) {
+        _err( 'rollback_transaction',  'no transaction to roll back' );
+        return undef;
+    }
+    if ($trans->rollback) {
+        $self->[TRANSACTION] = undef;
+        return 1;
+    }
 } #rollback_transaction
 
 sub index_silo {
@@ -442,6 +539,12 @@ sub transaction_silo {
 
 sub silos_entry_count {
     my $self = shift;
+
+    unless ($self->[IS_LOCKED]) {
+        _err( 'silos_entry_count', "record store not locked");
+        return undef;
+    }
+
     my $silos = $self->silos;
     my $count = 0;
     for my $silo (grep {defined} @$silos) {
@@ -451,11 +554,24 @@ sub silos_entry_count {
 }
 
 sub record_count {
-    return shift->[INDEX_SILO]->entry_count;
+    my $self = shift;
+
+    unless ($self->[IS_LOCKED]) {
+        _err( 'record_count', "record store not locked");
+        return undef;
+    }
+
+    return $self->[INDEX_SILO]->entry_count;
 }
 
 sub active_entry_count {
     my $self = shift;
+
+    unless ($self->[IS_LOCKED]) {
+        _err( 'active_entry_count', "record store not locked");
+        return undef;
+    }
+
     my $index = $self->index_silo;
     my $count = 0;
     for(1..$self->record_count) {
@@ -478,29 +594,52 @@ sub detect_version {
     return $source_version;
 } #detect_version
 
-
+sub _time {
+    int(time * 1000);
+}
 
 sub _vacate {
     my( $self, $silo_id, $id_to_empty ) = @_;
+
+    #
+    # empty a data silo store entry. 
+    #
+    # if this is at the end of the silo, just pop it off to reduce the silo size
+    #
+    # otherwise, move the last active entry to this cell, popping off inactive
+    #            entries as you go
+    #
+
     my $silo = $self->[SILOS][$silo_id];
     my $rc = $silo->entry_count;
+
     if( $id_to_empty == $rc ) {
         $silo->pop;
-    } else {
+    } 
+    else {
         while( $rc > $id_to_empty ) {
-            my( $state, $id ) = (@{$silo->get_record( $rc, 'IL' )});
-            if( $state == RS_ACTIVE ) {
-                $silo->copy_record($rc,$id_to_empty);
+            my( $rec_state, $id ) = (@{$silo->get_record( $rc, 'IL' )});
+            if( $rec_state == RS_ACTIVE ) {
+                # is active, so copy its data to the vacated position
+                # and update the index
+                unless ($silo->copy_record($rc,$id_to_empty)) {
+                    _warn ('_vacate', "unable to copy record $@ $!" );
+                    _err ('_vacate', "unable to copy record $@ $!" );
+                    return undef;
+                }
                 # the following does not update the time field, it preserves it
                 $self->[INDEX_SILO]->put_record( $id, [$silo_id,$id_to_empty], "IL" );
                 $silo->pop;
-                return;
+                return 1;
             }
-            elsif( $state == RS_DEAD ) {
+            elsif( $rec_state == RS_DEAD ) {
+                # is dead, pop it off and look for the next one
                 $silo->pop;
             }
             else {
-                return;
+                _warn ('_vacate', "got record state $rec_state. not popping" );
+                _err ('_vacate', "got record state $rec_state. not popping" );
+                return undef;
             }
             $rc--;
         }
@@ -508,7 +647,7 @@ sub _vacate {
     return 1;
 } #_vacate
 
-sub silo_id_for_size {
+sub _silo_id_for_size {
     my( $self, $data_write_size ) = @_;
 
     my $write_size = $self->[HEADER_SIZE] + $data_write_size;
@@ -517,11 +656,11 @@ sub silo_id_for_size {
     $silo_id++ if 2 ** $silo_id < $write_size;
     $silo_id = $self->[MIN_SILO_ID] if $silo_id < $self->[MIN_SILO_ID];
     return $silo_id;
-} #silo_id_for_size
+} #_silo_id_for_size
 
 # ---------------------- private stuffs -------------------------
 
-sub open_silo {
+sub _open_silo {
     my ($self, $silo_file, $template, $size, $max_file_size ) = @_;
 
     
@@ -535,28 +674,27 @@ sub open_silo {
 
 
 sub _make_path {
-    my( $dir, $msg ) = @_;
-    make_path( $dir, { error => \my $err } );
-    if( @$err ) {
-        $@ = "unable to make $msg directory.". join( ", ", map { $_->{$dir} } @$err );
-        return undef;
-    }
-    return 1;
+    my( $dir, $err, $msg ) = @_;
+    make_path( $dir, { error => $err } );
 }
 
-sub reset {
+sub _reset {
     my $self = shift;
+
+    $self->[TRANSACTION] = undef;
     my $index_silo = $self->index_silo;
     my $transaction_silo = $self->transaction_silo;
     my $silos = $self->silos;
     for my $silo ($index_silo, $transaction_silo, @$silos) {
-        $silo && $silo->reset;
+        if ($silo) {
+            $silo->reset;
+        }
     }
+    $self->_fix_transactions;
 }
 
 
-sub fix_transactions {
-return;
+sub _fix_transactions {
     my $self = shift;
     # check the transactions
     # if the transaction is in an incomplete state, fix it. Since the store is write locked
@@ -569,27 +707,23 @@ return;
     my $transaction_index_silo = $self->transaction_silo;
     my $last_trans = $transaction_index_silo->entry_count;
     while( $last_trans ) {
-        my( $state ) = @{$transaction_index_silo->get_record( $last_trans )};
-        my $tdir = "$self->[DIRECTORY]/transactions/$last_trans";
-        if( $state == TR_IN_ROLLBACK ||
-                $state == TR_IN_COMMIT ) {
-            # do a full rollback
-            # load the transaction
-            my $trans = Yote::RecordStore::File::Transaction->create( $self, $tdir, $last_trans );
-            $trans->rollback;
-            $transaction_index_silo->pop;
+        my $trans = Yote::RecordStore::File::Transaction->open( $self, $last_trans );
+        if ($trans) {
+            $trans->fix;
         }
-        elsif( $state == TR_COMPLETE ) {
-            $transaction_index_silo->pop;
-        }
-        else {
-            return;
-        }
-        $last_trans--;
+        $transaction_index_silo->pop;
+        --$last_trans;
     }
 
-} #fix_transactions
+} #_fix_transactions
 
+sub DESTROY {
+    my $self = shift;
+    my $fh = $self->[LOCK_FH];
+    if ($fh) {
+        close $fh;
+    }
+}
 
 "I became Iggy because I had a sadistic boss at a record store. I'd been in a band called the Iguanas. And when this boss wanted to embarrass and demean me, he'd say, 'Iggy, get me a coffee, light.' - Iggy Pop";
 

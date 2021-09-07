@@ -1,32 +1,5 @@
 package Yote::RecordStore::File::Silo;
 
-# TODO - verify perldoc
-#      - shed/keep YAML?
-#      - remove die, replace with return values
-#      - enable testing
-
-
-#
-# I am a silo. I live in a directory.
-# I keep my data in silo files in this directory.
-# Each silo file is allowed to be only so large,
-# so that is why there may be more than one of them.
-#
-# You can init me by giving me a directory,
-# a template and an optional size and a max size.
-#   I will figure out the record size based on what you give me.
-#   I will default to 2GB for a max size if no max size is given.
-#   I will have limitless size if you give me 0 for a max size
-#   I will save my version, the size, max size and template to the directory
-#
-#
-# You can open me by giving a directory, then
-#   push data to me and I return its id
-#   get data from me after giving me its id
-#   pop data from me
-#   ask how many records I have
-#
-
 use strict;
 use warnings;
 no warnings 'uninitialized';
@@ -55,26 +28,37 @@ use constant {
     CUR_COUNT           => 7,
 };
 
+sub _err {
+    my ($method,$txt) = @_;
+    $@ = __PACKAGE__."::$method $txt";
+}
 
 sub open_silo {
     my( $class, $dir, $template, $size, $max_file_size ) = @_;
 
     if( ! $dir ) {
-        die "must supply directory to open silo";
+        _err( 'open_silo', "must supply directory to open silo" );
+        return undef;
     }
     if( ! $template ) {
-        die "must supply template to open silo";
+        _err( 'open_silo', "must supply template to open silo" );
+        return undef;
     }
     my $record_size = $template =~ /\*/ ? $size : do { use bytes; length( pack( $template ) ) };
     if( $record_size < 1 ) {
-        die "no record size given to open silo";
+        _err( 'open_silo', "no record size given to open silo");
+        return undef;
     }
     if( $size && $size != $record_size ) {
-        die "Silo given size and template size do not match";
+        _err( 'open_silo', "Silo given size and template size do not match" );
+        return undef;
     }
-    make_path( $dir, { error => \my $err } );
 
-    if( @$err ) { die join( ", ", map { $_->{$dir} } @$err ) }
+    _make_path( $dir, \my $err );
+    if( @$err ) {
+        _err( '_make_path', "unable to make $dir directory.". join( ", ", map { $_->{$dir} } @$err ));
+        return undef;
+    }
 
     if( $max_file_size < 1 ) {
         $max_file_size = $Yote::RecordStore::File::Silo::DEFAULT_MAX_FILE_SIZE;
@@ -82,7 +66,11 @@ sub open_silo {
 
     unless( -e "$dir/0" ) {
         # must have at least an empty silo file
-        open my $out, '>', "$dir/0";
+        my $out = _open( '>', "$dir/0" );
+        unless ($out) {
+            _err( "open_silo", "unable to create silo data file $dir/0 : $@ $!" );
+            return undef;
+        }
         print $out '';
         close $out;
     }
@@ -106,6 +94,7 @@ sub next_id {
 
 sub reset {
     my $self = shift;
+
     $self->[CUR_COUNT] = undef;
 }
 
@@ -141,10 +130,14 @@ sub get_record {
         $template = $self->[TEMPLATE];
     }
     if( $id > $self->entry_count || $id < 1 ) {
-        $@ = "Yote::RecordStore::File::Silo->get_record : ($$) index $id out of bounds for silo $self->[DIRECTORY]. Silo has entry count of ".$self->entry_count;
+        _err( 'get_record', "index $id out of bounds for silo $self->[DIRECTORY]. Silo has entry count of ".$self->entry_count );
         return undef;
     }
     my( $idx_in_f, $fh, $subsilo_idx ) = $self->_fh( $id );
+    unless ($fh) {
+        _err( 'get_record', "Unable to open subsilo $id : $! $@" );
+        return undef;
+    }
 
     $offset //= 0;
     my $seek_pos = ( $self->[RECORD_SIZE] * $idx_in_f ) + $offset;
@@ -159,7 +152,7 @@ sub put_record {
     my( $self, $id, $data, $template, $offset ) = @_;
 
     if( $id > $self->entry_count || $id < 1 ) {
-        $@ = "Yote::RecordStore::File::Silo->put_record : index $id out of bounds for silo $self->[DIRECTORY]. Silo has entry count of ".$self->entry_count;
+        _err( 'put_record', "index $id out of bounds for silo $self->[DIRECTORY]. Silo has entry count of ".$self->entry_count );
         return undef;
     }
     if( ! $template ) {
@@ -173,7 +166,7 @@ sub put_record {
     my $write_size = do { use bytes; length( $to_write ) };
 
     if( $write_size > $rec_size) {
-        $@ = "Yote::RecordStore::File::Silo->put_record : record size $write_size too large. Max is $rec_size";
+        _err( 'put_record', "record size $write_size too large. Max is $rec_size" );
         return undef;
     }
 
@@ -254,6 +247,7 @@ sub size {
 sub copy_record {
     my( $self, $from_id, $to_id ) = @_;
     my $rec = $self->get_record($from_id);
+
     unless ($rec && $self->put_record( $to_id, $rec )) {
         return undef;
     }
@@ -269,13 +263,18 @@ sub empty_silo {
     my $dir = $self->[DIRECTORY];
     for my $file ($self->subsilos) {
         if( $file eq '0' ) {
-            open my $fh, '+<', "$dir/0";
+            my $fh = _open( '+<', "$dir/0" );
+            unless ($fh) {
+                _err( "unable to reset silo file $dir/0: $@ $!" );
+                return undef;
+            }
             truncate $fh, 0;
         } else {
             unlink "$dir/$file";
         }
     }
     $self->[CUR_COUNT] = 0;
+    return 1;
 } #empty_silo
 
 # destroys the silo. The silo will not be
@@ -287,7 +286,6 @@ sub unlink_silo {
         unlink "$dir/$file";
     }
     unlink "$dir/SINFO";
-    $self->[CUR_COUNT] = 0;
     @$self = ();
 } #unlink_silo
 
@@ -315,7 +313,11 @@ sub ensure_entry_count {
         if( $records_needed_to_fill > 0 ) {
             # fill the last file up with \0
 #            my $fh = cacheout "+<", 
-            open my $fh, '+<', "$dir/$write_file" or die "$dir/$write_file : $!";
+            my $fh = _open( '+<', "$dir/$write_file" );
+            unless ($fh) {
+                _err( 'ensure_entry_count', "unable to open $dir/$write_file : $@ $!" );
+                return undef;
+            }
            # $fh->autoflush(1);
             $nulls = "\0" x ( $records_needed_to_fill * $rec_size );
             my $seek_pos = $rec_size * $existing_file_records;
@@ -330,9 +332,14 @@ sub ensure_entry_count {
             $write_file++;
 
             if( -e "$dir/$write_file" ) {
-                die "Yote::RecordStore::File::Silo->ensure_entry_count : file $dir/$write_file already exists";
+                _err( 'ensure_entry_count', "file $dir/$write_file already exists" );
+                return undef;
             }
-            open( my $fh, ">", "$dir/$write_file" );
+            my $fh = _open( ">", "$dir/$write_file" );
+            unless ($fh) {
+                _err( 'ensure_entry_count', "could not open file '$dir/$write_file' : $! $@" );
+                return undef;
+            }
 #            $fh->autoflush(1);
             print $fh '';
             unless( $nulls ) {
@@ -348,9 +355,11 @@ sub ensure_entry_count {
             $write_file++;
 
             if( -e "$dir/$write_file" ) {
-                die "Yote::RecordStore::File::Silo->ensure_entry_count : file $dir/$write_file already exists";
+                _err( 'ensure_entry_count', "file $dir/$write_file already exists" );
+                return undef;
             }
-            open( my $fh, ">", "$dir/$write_file" );
+            my $fh = _open( ">", "$dir/$write_file" );
+            
 #            $fh->autoflush(1);
             print $fh '';
             my $nulls = "\0" x ( $needed * $rec_size );
@@ -370,13 +379,13 @@ sub ensure_entry_count {
 sub subsilos {
     my $self = shift;
     my $dir = $self->[DIRECTORY];
-    my $dh = $self->[DIR_HANDLE];
-    if( $dh ) {
-        rewinddir $dh;
-    } else {
-        opendir( $dh, $self->[DIRECTORY] ) or die "Yote::RecordStore::File::Silo->subsilos : can't open $dir\n";
-        $self->[DIR_HANDLE] = $dh;
+    my $dh = $self->_opensilosdir;
+
+    unless ($dh) {
+        _err( 'subsilos', "unable to open subsilo directory $dir: $! $@" );
+        return undef;
     }
+
     my( @files ) = (sort { $a <=> $b } grep { $_ eq '0' || (-s "$dir/$_") > 0 } grep { $_ > 0 || $_ eq '0' } readdir( $dh ) );
     return @files;
 } #subsilos
@@ -398,12 +407,38 @@ sub _fh {
     my $subsilo_idx = int( ($id-1) / $rec_per_subsilo );
     my $idx_in_f = ($id - ($subsilo_idx*$rec_per_subsilo)) - 1;
 
-    open my $fh, "+<", "$dir/$subsilo_idx" or die "$dir/$subsilo_idx : $!";
+    my $fh = _open ("+<", "$dir/$subsilo_idx");
+    unless( $fh ) {
+        _err( '_fh', "$dir/$subsilo_idx : $!" );
+        return undef;
+    }
     return $idx_in_f, $fh, $subsilo_idx;
 
 } #_fh
 
+sub _open {
+    my( $mod, $file) = @_;
+    open my ($fh), $mod, $file;
+    return $fh;
+}
 
+sub _make_path {
+    my( $dir, $err ) = @_;
+    make_path( $dir, { error => \$err } );
+}
+
+sub _opensilosdir {
+    my ($self) = @_;
+    my $dir = $self->[DIRECTORY];
+    my $dh = $self->[DIR_HANDLE];
+    if( $dh ) {
+        rewinddir $dh;
+    } else {
+        opendir $dh, $self->[DIRECTORY];
+        $self->[DIR_HANDLE] = $dh;
+    }
+    return $dh;
+}
 
 "Silos are the great hidden constant of the industrialised world.
     - John Darnielle, Universal Harvester";
