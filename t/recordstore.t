@@ -30,20 +30,14 @@ my $is_root = `whoami` =~ /root/;
 #               init
 # -----------------------------------------------------
 
-test_cleanup();
-
 test_init();
+test_cleanup();
 test_use();
-
 test_transactions();
-
 test_sillystrings();
 test_meta();
-
 test_vacate();
-
 test_misc();
-
 test_locking();
 
 done_testing;
@@ -965,8 +959,23 @@ use Scalar::Util qw(openhandle);
                   'monkeypatch put',
                   'No id for monkied put record on delete' );
     }
-    is ($@, undef, 'BEEEE');
+    is ($@, undef, 'no warnings');
 
+    {
+        $dir = tempdir( CLEANUP => 1 );
+        my $lock_file = "$dir/LOCK";
+        open my $out, '>', $lock_file;
+        $out->autoflush(1);
+        print $out '';
+        chmod 0444, $lock_file;
+
+        failnice (sub {Yote::RecordStore->open_store($dir)},
+                  'cannot open',
+                  'open store fails when locked is locked');
+        chmod 0777, $lock_file;
+        Yote::RecordStore->open_store($dir);
+        pass ('store can open now that  LOCK file is unlocked' );
+    }
 } #test_use
 
 sub unlocks {
@@ -992,10 +1001,8 @@ sub test_transactions {
     my $oid = $copy->stow( "OMETHING ELSE" );
     ok (!$@, 'no error after copy stow 2');
     is ( $oid, 2, "second id" );
-    ok( ! Yote::RecordStore->can_lock( $dir ), 'unable to lock directory while copy locks it' );
 
     unlocks ($copy);
-    ok( Yote::RecordStore->can_lock( $dir ), 'now can lock directory since copy unlocked it' );
 
     locks ($rs);
     ok (!$@, 'no error after lock');
@@ -1033,12 +1040,8 @@ sub test_transactions {
               'may not unlock with a pending',
               'cant unlock store with active transaction' );
 
-    ok( ! Yote::RecordStore->can_lock( $dir ), 'rs is locked' );
-
     close $rs->[$rs->LOCK_FH];
     $rs->[$rs->IS_LOCKED] = 0;
-
-    ok( Yote::RecordStore->can_lock( $dir ), 'rs not locked' );
 
     # see that there is one transaction that needs fixing
     my $trans_silo = $copy->transaction_silo;
@@ -1508,10 +1511,10 @@ sub test_locking {
         my $store = Yote::RecordStore->open_store( $dir );
         $forker->put( 'A STORE' );
         usleep (5000);
-        my $canlock = $store->can_lock ? 'A CAN LOCK': 'A CANNOT LOCK';
-        $canlock .= Yote::RecordStore->can_lock( $store->[$store->DIRECTORY] ) ? '': ' DID NOT WORK AGAIN';
+
         $store->lock;
-        $forker->put( $canlock );
+
+        $forker->put( 'A LOCKED' );
         usleep( 15000 );
         $forker->put( "A TO UNLOCK" );
         $store->unlock;
@@ -1529,11 +1532,11 @@ sub test_locking {
 
         $forker->spush('C STORE');
 
-        $forker->expect( 'A CAN LOCK', 'B' );
-        my $canlock = $store->can_lock ? 'B CAN LOCK': 'B CANNOT LOCK';
+        $forker->expect( 'A LOCKED' );
+
         $store->lock;
-        $forker->spush ("A TO UNLOCK");
-        $forker->put ($canlock);
+
+        $forker->put ('B LOCKED');
         usleep( 8000 );
         $forker->put( "B TO UNLOCK" );
         $store->unlock;
@@ -1545,19 +1548,19 @@ sub test_locking {
     unless( $C ) {
         $forker->expect('start' );
         $forker->spush('A STORE');
-        $forker->expect( 'B STORE', 'C' );
+        $forker->expect( 'B STORE' );
         my $store = Yote::RecordStore->open_store( $dir );
 
         $forker->put('C STORE');
 
-        $forker->spush('A CAN LOCK', 
+        $forker->spush('A LOCKED', 
                        'A TO UNLOCK', 
                        'A UNLOCKED' );
-        $forker->expect('B CANNOT LOCK', 'C' );
-        my $canlock = $store->can_lock ? 'C CAN LOCK': 'C CANNOT LOCK';
+        $forker->expect('B LOCKED', 'C' );
+
         $store->lock;
 
-        $forker->put ($canlock);
+        $forker->put('C LOCKED');
 
         $forker->put( "C TO UNLOCK" );
         $store->unlock;
@@ -1567,7 +1570,6 @@ sub test_locking {
     }
 
     $forker->put( 'start' );
-
     waitpid $A, 0;
     waitpid $B, 0;
     waitpid $C, 0;
@@ -1577,13 +1579,13 @@ sub test_locking {
                  'A STORE',
                  'B STORE',
                  'C STORE',
-                 'A CAN LOCK',
+                 'A LOCKED',
                  'A TO UNLOCK',
                  'A UNLOCKED',
-                 'B CANNOT LOCK',
+                 'B LOCKED',
                  'B TO UNLOCK',
                  'B UNLOCKED',
-                 'C CANNOT LOCK',
+                 'C LOCKED',
                  'C TO UNLOCK',
                  'C UNLOCKED',
                ], 

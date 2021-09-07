@@ -332,16 +332,33 @@ This is used by Yote::RecordStore and is not meant for use outside of it.
 
 =head1 METHODS
 
-=head2 create
+=head2 create( store );
+
+Package method that returns a new transaction object.
+
+=head2 open( store, transaction_id )
+
+Package method that returns a transaction object
+in the store with the given id.
 
 =head2 commit
 
+Commits this transaction by updating the index to point to new versions
+of changed records.
+
 =head2 rollback
+
+Rolls back this transaction, updating the index to its original state.
 
 =head2 fetch( id )
 
 Returns the record associated with the ID. If the ID has no
 record associated with it, undef is returned.
+
+=head2 fix
+
+Tries to roll back the current incomplete transaction if it is
+incomplete.
 
 =head2 stow( data, optionalID )
 

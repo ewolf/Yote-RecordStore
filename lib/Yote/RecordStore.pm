@@ -31,7 +31,7 @@ package Yote::RecordStore;
 
  my $count = $store->entry_count;
 
- $store->lock( qw( FEE FIE FOE FUM ) ); # lock blocks, may not be called until unlock.
+ $store->lock; #locks this recordstore
 
  $store->unlock; # unlocks all
 
@@ -149,19 +149,17 @@ sub open_store {
     # create the lock file if it does not exist. if it cannot
     # be locked, error out here
     if (-e $lockfile) {
-        unless ($lock_fh = _open ($lockfile, '>' )) {
-            die "cannot open, unable to open lock file '$lockfile' to open store: $! $@";
-        }
-        $lock_fh->autoflush(1);
-        unless ($lock_fh && _flock( $lock_fh, LOCK_EX) ) {
+        $lock_fh = _open ($lockfile, '>' );
+        unless (_flock( $lock_fh, LOCK_EX) ) {
             die "cannot open, unable to open lock file '$lockfile' to open store: $! $@";
         }
     } else {
+        $lock_fh = _open ($lockfile, '>' );
         unless ($lock_fh = _open ($lockfile, '>' )) {
             die "cannot open, unable to open lock file '$lockfile' to open store: $! $@";
         }
         $lock_fh->autoflush(1);
-        unless ($lock_fh && _flock( $lock_fh, LOCK_EX) ) {
+        unless (_flock( $lock_fh, LOCK_EX) ) {
             die "cannot open, unable to open lock file '$lockfile' to open store: $! $@";
         }
         print $lock_fh "LOCK";
@@ -234,38 +232,30 @@ sub open_store {
     return $store;
 } #open_store
 
+=item directory
+
+return base directory for this recordstore.
+
+=cut
 sub directory {
     shift->[DIRECTORY];
 }
 
+=item is_locked
+
+returns true if this recordstore is currntly locked.
+
+=cut
 sub is_locked {
     my $self = shift;
     return $self->[IS_LOCKED];
 }
 
-sub can_lock {
-    my ($pkg,$dir) = @_;
+=item lock
 
-    if (ref $pkg) {
-        my $lock_fh = $pkg->[LOCK_FH] = _openhandle($pkg->[LOCK_FH]);
-        unless ($lock_fh) {
-            my $lockfile = $pkg->[LOCK_FILE];
-say STDERR "zOLOCK $lockfile";
-            $lock_fh = _open( $lockfile, '+<' );
-        }
-        my $res = _flock( $lock_fh, LOCK_EX | LOCK_NB );
-        $res && _flock( $lock_fh, LOCK_UN );
-        return $res;
-    }
+lock this recordstore.
 
-    my $lockfile = "$dir/LOCK";
-    my $lock_fh = _open( $lockfile, '+<' );
-
-    my $r = _flock( $lock_fh, LOCK_EX | LOCK_NB );        
-    $r && _flock( $lock_fh, LOCK_UN );
-    return $r;
-}
-
+=cut
 sub lock {
     my $self = shift;
 
@@ -286,6 +276,11 @@ sub lock {
     return 1;
 }
 
+=item unlock
+
+unlock this recordstore.
+
+=cut
 sub unlock {
     my $self = shift;
 
@@ -304,6 +299,11 @@ sub unlock {
     }
 }
 
+=item fetch(id)
+
+Returns the record by id.
+
+=cut
 sub fetch {
     my( $self, $id ) = @_;
 
@@ -319,6 +319,11 @@ sub fetch {
     $self->_fetch( $id );
 } #fetch
 
+=item fetch_meta(id)
+
+Returns update_time,creation_time of the record.
+
+=cut
 
 sub fetch_meta {
     my( $self, $id ) = @_;
@@ -335,6 +340,12 @@ sub fetch_meta {
     return $update_time, $creation_time;
 } #fetch_meta
 
+=item stow( data, id )
+
+stores the given data and returns the id. If not given
+an id, it assigns the next free id to the item.
+
+=cut
 sub stow {
     my ($self, $data, $id ) = @_;
 
@@ -351,7 +362,11 @@ sub stow {
 }
 
 
+=item next_id
 
+creates and returns a new id.
+
+=cut
 sub next_id {
     my $self = shift;
     unless ($self->[IS_LOCKED]) {
@@ -361,10 +376,20 @@ sub next_id {
     return $self->[INDEX_SILO]->next_id;
 } #next_id
 
+=item first_id
+
+returns the first id in this store.
+
+=cut
 sub first_id {
     return 1;
 }
 
+=item delete_record(id)
+
+Marks the record by id as dead.
+
+=cut
 sub delete_record {
     my( $self, $del_id ) = @_;
 
@@ -395,7 +420,11 @@ sub _delete_record {
     }
 } #_delete_record
 
+=item use_transaction
 
+
+
+=cut
 sub use_transaction {
     my $self = shift;
 
@@ -411,6 +440,10 @@ sub use_transaction {
 
     return $self->[TRANSACTION];
 } #use_transaction
+
+=item commit_transaction
+
+=cut
 
 sub commit_transaction {
     my $self = shift;
@@ -431,6 +464,9 @@ sub commit_transaction {
 
 } #commit_transaction
 
+=item rollback_transaction
+
+=cut
 sub rollback_transaction {
     my $self = shift;
 
@@ -447,18 +483,38 @@ sub rollback_transaction {
     return 1;
 } #rollback_transaction
 
+=item index_silo
+
+returns the idexing silo object.
+
+=cut
 sub index_silo {
     return shift->[INDEX_SILO];
 }
 
+=item silos
+
+returns array ref of all storage silos.
+
+=cut
 sub silos {
     return [@{shift->[SILOS]}];
 }
 
+=item transaction_silo
+
+returns the transaction silo object.
+
+=cut
 sub transaction_silo {
     return shift->[TRANSACTION_INDEX_SILO];
 }
 
+=item silos_entry_count
+
+Returns the sum of entry counts (live or dead) for all silos.
+
+=cut
 sub silos_entry_count {
     my $self = shift;
 
@@ -474,6 +530,12 @@ sub silos_entry_count {
     return $count;
 }
 
+=item record_count
+
+Returns the number of all records, active or dead.
+
+=cut
+
 sub record_count {
     my $self = shift;
 
@@ -484,6 +546,13 @@ sub record_count {
     return $self->[INDEX_SILO]->entry_count;
 }
 
+=item active_entry_count
+
+Returns the number of entries not marked as dead in the store.
+This scans the index and returns a count of all entries with assigned
+placements.
+
+=cut
 sub active_entry_count {
     my $self = shift;
 
@@ -501,6 +570,12 @@ sub active_entry_count {
     return $count;
 }
 
+=item use_transaction( directory )
+
+package method returns the version of the
+record store in a particular directory.
+
+=cut
 sub detect_version {
     my( $cls, $dir ) = @_;
     my $ver_file = "$dir/VERSION";
@@ -531,12 +606,16 @@ sub _open {
     my ($file, $mode) = @_;
     my $fh;
     my $res = CORE::open ($fh, $mode, $file);
-    return $res && $fh;
+    if ($res) {
+        return $fh;
+    }
 }
 
 sub _flock {
     my ($fh, $flags) = @_;
-    return flock($fh,$flags);
+    if ($fh){
+        return flock($fh,$flags);
+    }
 }
 
 sub _stow {
@@ -590,8 +669,7 @@ sub _fetch {
 } #fetch
 
 sub _openhandle {
-    my $fh = shift;
-    $fh && openhandle( $fh );
+    return openhandle( shift );
 }
 
 sub _mark {

@@ -1,6 +1,9 @@
 package forker;
 
+use v5.10;
+
 use strict;
+use warnings;
 
 use Fcntl qw( :flock );
 use Time::HiRes qw(usleep);
@@ -57,11 +60,19 @@ sub get {
 sub expect {
     my( $self, $what, $tag ) = @_;
     $self->spush( $what );
-    while( 1 ) {
-use v5.10;
+    while ( 1 ) {
 #say "$tag: ".join(",", @{$self->get()}). ' eq '. join(",", @{$self->{stack}} );
-        if( join(",", @{$self->get()}) eq join(",", @{$self->{stack}} ) ) {
+        my @got      = @{$self->get()};
+        if (grep { $_ eq '__DEATH__' } @got) {
+            exit;
+        }
+        my @expected = @{$self->{stack}};
+        if( join(",", @got) eq join(",", @expected) ) {
             return;
+        }
+        if (@got > @expected) {
+            $self->put( '__DEATH__' );
+            exit;
         }
         usleep(500);
     }
