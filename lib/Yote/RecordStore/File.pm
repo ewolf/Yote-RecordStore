@@ -103,6 +103,9 @@ sub open_store {
     unless( -d $dir ) {
         _make_path( $dir, 'base' );
     }
+
+    my $use_sync = $options{sync};
+
     my $max_file_size = $options{max_file_size};
     $max_file_size = $Yote::RecordStore::File::Silo::DEFAULT_MAX_FILE_SIZE unless $max_file_size;
     
@@ -155,22 +158,24 @@ END
     }
 
     my $index_silo = $cls->open_silo( "$dir/index_silo",
-                                       "ILLL", #silo id, id in silo, last updated time, created time
-                                       0,
-                                       $max_file_size );
+                                      "ILLL", #silo id, id in silo, last updated time, created time
+                                      0,
+                                      $max_file_size,
+                                      $use_sync );
 
     my $transaction_index_silo = $cls->open_silo( "$dir/transaction_index_silo",
-                                                   "IL", #state, time
-                                                   0,
-                                                   $max_file_size );
-
+                                                  "IL", #state, time
+                                                  0,
+                                                  $max_file_size,
+                                                  $use_sync );
     my $silos = [];
 
     for my $silo_id ($min_silo_id..$max_silo_id) {
         $silos->[$silo_id] = $cls->open_silo( "$silo_dir/$silo_id",
-                                               'ILLa*',  # status, id, data-length, data
-                                               2 ** $silo_id,
-                                               $max_file_size );
+                                              'ILLa*',  # status, id, data-length, data
+                                              2 ** $silo_id,
+                                              $max_file_size,
+                                              $use_sync );
     }
     my $header = pack( 'ILL', 1,2,3 );
     my $header_size = do { use bytes; length( $header ) };
@@ -566,11 +571,12 @@ sub silo_id_for_size {
 } #silo_id_for_size
 
 sub open_silo {
-    my ($self, $silo_file, $template, $size, $max_file_size ) = @_;
+    my ($self, $silo_file, $template, $size, $max_file_size, $sync ) = @_;
     return Yote::RecordStore::File::Silo->open_silo( $silo_file,
                                                      $template,
                                                      $size,
-                                                     $max_file_size );
+                                                     $max_file_size,
+                                                     $sync );
 }
 
 # ---------------------- private stuffs -------------------------

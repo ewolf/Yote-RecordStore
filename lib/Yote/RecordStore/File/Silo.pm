@@ -56,11 +56,13 @@ use constant {
     MAX_FILE_SIZE       => 4,
     RECORDS_PER_SUBSILO => 5,
     DIR_HANDLE          => 6,
+    SYNC                => 7,
+    CUR_COUNT           => 8,
 };
 
 
 sub open_silo {
-    my( $class, $dir, $template, $size, $max_file_size ) = @_;
+    my( $class, $dir, $template, $size, $max_file_size, $sync ) = @_;
 
     if( ! $dir ) {
         die "must supply directory to open silo";
@@ -106,6 +108,7 @@ END
         $record_size,
         $max_file_size,
         int($max_file_size / $record_size),
+        $sync,
         ], $class;
 } #open_silo
 
@@ -129,12 +132,19 @@ sub next_id {
 sub entry_count {
     # return how many entries this silo has
     my $self = shift;
+
+    if ($self->[SYNC]) {
+        if (defined $self->[CUR_COUNT]) {
+            return $self->[CUR_COUNT];
+        }
+    }
+
     my @files = $self->subsilos;
     my $filesize;
     for my $file (@files) {
         $filesize += -s "$self->[DIRECTORY]/$file";
     }
-    return int( $filesize / $self->[RECORD_SIZE] );
+    my $count = $self->[CUR_COUNT] = int( $filesize / $self->[RECORD_SIZE] );
 } #entry_count
 
 sub get_record {
@@ -214,6 +224,7 @@ sub pop {
         unlink "$self->[DIRECTORY]/$subsilo_idx";
 #        FileCache::cacheout_close $fh;
     }
+    undef $self->[CUR_COUNT];
 
     return $ret;
 } #pop
@@ -279,6 +290,7 @@ sub empty_silo {
             unlink "$dir/$file";
         }
     }
+    $self->[CUR_COUNT] = 0;
 } #empty_silo
 
 # destroys the silo. The silo will not be
@@ -290,6 +302,7 @@ sub unlink_silo {
         unlink "$dir/$file";
     }
     unlink "$dir/SINFO";
+    $self->[CUR_COUNT] = 0;
     @$self = ();
 } #unlink_silo
 
@@ -361,6 +374,7 @@ sub ensure_entry_count {
             close $fh;
         }
     }
+    undef $self->[CUR_COUNT];
     $ec = $self->entry_count;
     return;
 } #ensure_entry_count
