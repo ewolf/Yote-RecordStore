@@ -4,7 +4,6 @@ use warnings;
 no warnings 'uninitialized';
 
 use lib 't/lib';
-use api;
 
 use Data::Dumper;
 
@@ -29,14 +28,12 @@ my $is_root = `whoami` =~ /root/;
 #               init
 # -----------------------------------------------------
 
-my $factory = Factory->new;
+test_cleanup();
 
 test_init();
 test_use();
 
 test_transactions();
-
-#test_locks();
 
 test_sillystrings();
 test_meta();
@@ -44,12 +41,6 @@ test_meta();
 test_vacate();
 
 test_misc();
-
-#api->test_failed_async( $factory );
-#api->test_transaction_async( $factory );
-#api->test_locks_async( $factory );
-#api->test_suite_recordstore( $factory );
-
 
 done_testing;
 exit;
@@ -93,7 +84,7 @@ sub get_rec {
         $res->[3] = substr( $res->[3], 0, $res->[2] );
     }
     if ($limit) {
-        return [@$res[0..($limit-1)]];
+        $res = [@$res[0..($limit-1)]];
     }
     $res;
 }
@@ -287,6 +278,154 @@ sub test_vacate {
 
 }
 
+sub big {
+    my $str = shift;
+    return  $str x 7_000;
+}
+
+sub test_cleanup {
+    my $dir = tempdir( CLEANUP => 1 );
+    {
+        # test a transaction that gets to the marked completed stage, but doesn't do the cleanup steps
+        # after that
+        my $rs = Yote::RecordStore->open_store( $dir );
+
+        my $silo = $rs->silos->[12];
+        my $bsilo = $rs->silos->[13];
+        my $isilo = $rs->index_silo;
+        my $tsilo = $rs->transaction_silo;
+
+        $rs->lock;
+        $rs->stow( "AA" ); #1
+        $rs->stow( "BB" ); #2
+        $rs->stow( "CC" ); #3
+        $rs->stow( "DD" ); #4
+        $rs->stow( "EE" ); #5
+        $rs->stow( "FF" ); #6
+
+        $rs->stow( big("G")); #7
+        $rs->stow( big("H")); #8
+        $rs->stow( big("I")); #9
+        $rs->stow( big("J")); #10
+        $rs->stow( big("K")); #11
+
+        is ($silo->entry_count, 6, '6 in small silo' );
+        is ($bsilo->entry_count, 5, '5 in big silo' );
+        
+        my $sis = sub {
+            my( $sid, $id, $stat, $val ) = @_;
+            is_deeply( get_rec($sid, $silo), [$stat,$id,length($val),$val], "rec $val $id - 12/$sid" );
+        };
+        my $bis = sub {
+            my( $sid, $id, $stat, $val ) = @_;
+            my $bval = big($val);
+            is_deeply( get_rec($sid, $bsilo), [$stat,$id,length($bval),$bval], "rec big $val  $id - 13/$sid" );
+        };
+        $sis->( 1, 1, $rs->RS_ACTIVE, "AA" );
+        $sis->( 2, 2, $rs->RS_ACTIVE, "BB" );
+        $sis->( 3, 3, $rs->RS_ACTIVE, "CC" );
+        $sis->( 4, 4, $rs->RS_ACTIVE, "DD" );
+        $sis->( 5, 5, $rs->RS_ACTIVE, "EE" );
+        $sis->( 6, 6, $rs->RS_ACTIVE, "FF" );
+
+        $bis->( 1, 7, $rs->RS_ACTIVE, "G" );
+        $bis->( 2, 8, $rs->RS_ACTIVE, "H" );
+        $bis->( 3, 9, $rs->RS_ACTIVE, "I" );
+        $bis->( 4, 10, $rs->RS_ACTIVE, "J" );
+        $bis->( 5, 11, $rs->RS_ACTIVE, "K" );
+
+        $rs->delete_record( 2 );
+        $rs->delete_record( 7 );
+
+        $sis->( 1, 1, $rs->RS_ACTIVE, "AA" );
+        $sis->( 2, 2, $rs->RS_DEAD, "BB" );
+        $sis->( 3, 3, $rs->RS_ACTIVE, "CC" );
+        $sis->( 4, 4, $rs->RS_ACTIVE, "DD" );
+        $sis->( 5, 5, $rs->RS_ACTIVE, "EE" );
+        $sis->( 6, 6, $rs->RS_ACTIVE, "FF" );
+
+        $bis->( 1, 7, $rs->RS_DEAD, "G" );
+        $bis->( 2, 8, $rs->RS_ACTIVE, "H" );
+        $bis->( 3, 9, $rs->RS_ACTIVE, "I" );
+        $bis->( 4, 10, $rs->RS_ACTIVE, "J" );
+        $bis->( 5, 11, $rs->RS_ACTIVE, "K" );
+
+        $rs->use_transaction;
+        
+        $rs->stow( "GG", 7 );
+
+        $rs->stow( big("L"), 2 );
+
+        $sis->( 1, 1, $rs->RS_ACTIVE, "AA" );
+        $sis->( 2, 2, $rs->RS_DEAD, "BB" );
+        $sis->( 3, 3, $rs->RS_ACTIVE, "CC" );
+        $sis->( 4, 4, $rs->RS_ACTIVE, "DD" );
+        $sis->( 5, 5, $rs->RS_ACTIVE, "EE" );
+        $sis->( 6, 6, $rs->RS_ACTIVE, "FF" );
+        $sis->( 7, 7, $rs->RS_IN_TRANSACTION, "GG" );
+
+        $bis->( 1, 7, $rs->RS_DEAD, "G" );
+        $bis->( 2, 8, $rs->RS_ACTIVE, "H" );
+        $bis->( 3, 9, $rs->RS_ACTIVE, "I" );
+        $bis->( 4, 10, $rs->RS_ACTIVE, "J" );
+        $bis->( 5, 11, $rs->RS_ACTIVE, "K" );
+        $bis->( 6, 2, $rs->RS_IN_TRANSACTION, "L" );
+
+        $rs->commit_transaction;
+
+        is ($silo->entry_count, 8, '8 in small silo' );
+        $sis->( 1, 1, $rs->RS_ACTIVE, "AA" );
+        $sis->( 2, 2, $rs->RS_DEAD, "BB" );
+        $sis->( 3, 3, $rs->RS_ACTIVE, "CC" );
+        $sis->( 4, 4, $rs->RS_ACTIVE, "DD" );
+        $sis->( 5, 5, $rs->RS_ACTIVE, "EE" );
+        $sis->( 6, 6, $rs->RS_ACTIVE, "FF" );
+        $sis->( 7, 7, $rs->RS_ACTIVE, "GG" );
+
+        my $x = get_rec( 8, $silo );
+
+        my @parts = unpack "IIIIII" x 2, $x->[3];
+        my $a = [@parts[0..5]];
+        my $b = [@parts[6..11]];
+
+        if ($a->[1] == 2) {
+            ($a,$b) = ($b,$a);
+        }
+        
+        is( $x->[0], $rs->RS_DEAD );
+        is_deeply( [@$a,@$b], [$rs->RS_ACTIVE,7,0,0,12,7,
+                               $rs->RS_ACTIVE,2,0,0,13,6], 
+                   "correctly packed commit" );
+
+        is ($bsilo->entry_count, 6, '6 in large silo' );
+        $bis->( 1, 7, $rs->RS_DEAD, "G" );
+        $bis->( 2, 8, $rs->RS_ACTIVE, "H" );
+        $bis->( 3, 9, $rs->RS_ACTIVE, "I" );
+        $bis->( 4, 10, $rs->RS_ACTIVE, "J" );
+        $bis->( 5, 11, $rs->RS_ACTIVE, "K" );
+        $bis->( 6, 2, $rs->RS_ACTIVE, "L" );
+
+        $rs->_vacuum;
+
+        is ($silo->entry_count, 6, '6 in small silo' );
+        is ($bsilo->entry_count, 5, '5 in large silo' );
+        $sis->( 1, 1, $rs->RS_ACTIVE, "AA" );
+        $sis->( 2, 7, $rs->RS_ACTIVE, "GG" );
+        $sis->( 3, 3, $rs->RS_ACTIVE, "CC" );
+        $sis->( 4, 4, $rs->RS_ACTIVE, "DD" );
+        $sis->( 5, 5, $rs->RS_ACTIVE, "EE" );
+        $sis->( 6, 6, $rs->RS_ACTIVE, "FF" );
+
+
+        $bis->( 1, 2, $rs->RS_ACTIVE, "L" );
+        $bis->( 2, 8, $rs->RS_ACTIVE, "H" );
+        $bis->( 3, 9, $rs->RS_ACTIVE, "I" );
+        $bis->( 4, 10, $rs->RS_ACTIVE, "J" );
+        $bis->( 5, 11, $rs->RS_ACTIVE, "K" );
+    }    
+
+}
+
 sub test_init {
     my $dir = tempdir( CLEANUP => 1 );
 
@@ -398,79 +537,6 @@ sub test_init {
     }
 
 } #test_init
-
-sub test_locks {
-    my $use_single = shift;
-    my $dir = tempdir( CLEANUP => 1 );
-
-    my $store = Yote::RecordStore->open_store( $dir );
-    $store->lock( "FOO", "BAR", "BAZ", "BAZ" );
-
-    eval {
-        $store->lock( "SOMETHING" );
-        fail( "Yote::RecordStore->lock called twice in a row" );
-    };
-    like( $@, qr/cannot be called twice in a row/, 'Yote::RecordStore->lock called twice in a row error message' );
-    undef $@;
-    $store->unlock;
-    $store->lock( "SOMETHING" );
-    pass( "Store was able to lock after unlocking" );
-    $store->unlock;
-
-    $store->lock( "SOMETHING", "ZOMETHING" );
-    pass( "Store was able to lock same label after unlocking" );
-    $store->unlock;
-
-    unless( $is_root ) {
-        chmod 0444, "$dir/user_locks/SOMETHING";
-        eval {
-            $store->lock( "SOMETHING" );
-            fail( "Store was able to lock unwritable lock file" );
-        };
-        like( $@, qr/lock failed/, 'lock failed when unwritable' );
-        undef $@;
-        chmod 0744, "$dir/user_locks/SOMETHING";
-
-        chmod 0444, "$dir/user_locks/ZOMETHING";
-        eval {
-            $store->lock( "BUMTHING", "ZOMETHING" );
-            fail( "Store was able to lock unwritable lock file" );
-        };
-        like( $@, qr/lock failed/, 'lock failed when unwritable' );
-        undef $@;
-
-        chmod 0744, "$dir/user_locks/ZOMETHING";
-        $store->lock( "BUMTHING", "ZOMETHING" );
-        pass( 'store able to lock with permissions restored' );
-        $store->unlock;
-
-        $dir = tempdir( CLEANUP => 1 );
-        eval {
-            $store = Yote::RecordStore->open_store( $dir );
-            pass( "Was able to open store" );
-            chmod 0444, "$dir/user_locks";
-
-            $store->lock( "FOO" );
-            fail( "Yote::RecordStore->lock didnt die trying to lock to unwriteable directory" );
-        };
-        like( $@, qr/lock failed/, "unable to lock because of unwriteable lock directory" );
-        undef $@;
-
-        $dir = tempdir( CLEANUP => 1 );
-        eval {
-            $store = Yote::RecordStore->open_store( $dir );
-            open my $out, '>', "$dir/user_locks/BAR";
-            print $out '';
-            close $out;
-            chmod 0444, "$dir/user_locks/BAR";
-            pass( "Was able to open store" );
-            $store->lock( "FOO", "BAR", "BAZ" );
-            fail( "Yote::RecordStore->lock didnt die trying to lock unwriteable lock file" );
-        };
-        like( $@, qr/lock failed/, "unable to lock because of unwriteable lock file" );
-        undef $@;
-    }
-} #test_locks
 
 sub test_use {
     my $dir = tempdir( CLEANUP => 1 );
@@ -1169,10 +1235,7 @@ sub test_transactions {
         is_deeply( get_rec(1, $silo), [$rs->RS_DEAD,1,4,'WOOF'], 'rec 2 after commit is first in silo' );
 
         is ($isilo->entry_count, 3, 'three index entry after commit');
-print STDERR Data::Dumper->Dump(["BREAKS HERe because it has been committed, so the transaction should have its obj id removed"]);
-        
         $trans->fix;
-print STDERR Data::Dumper->Dump(["A"]);
     }
 
     # put_record doesnt work for
@@ -1185,9 +1248,7 @@ print STDERR Data::Dumper->Dump(["A"]);
         my $silo = $store->silos->[12];
         my $tsilo = $store->transaction_silo;
         my $isilo = $store->index_silo;
-print STDERR Data::Dumper->Dump(["A"]);
         locks ($store);
-print STDERR Data::Dumper->Dump(["B"]);
         my $failid = [];
         {
             no warnings 'redefine';
@@ -1346,21 +1407,5 @@ sub test_meta {
     }
 }
 
-package Factory;
-
-use File::Temp qw/ :mktemp tempdir /;
-
-sub new { return bless {}, shift }
-
-sub new_rs {
-    my $dir = tempdir( CLEANUP => 1 );
-    my $store = Yote::RecordStore->open_store($dir);
-
-    return $store;
-}
-sub reopen {
-    my( $cls, $oldstore ) = @_;
-    return Yote::RecordStore->open_store( $oldstore->[Yote::RecordStore->DIRECTORY] );
-}
 
 __END__
