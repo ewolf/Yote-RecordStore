@@ -723,10 +723,7 @@ sub test_use {
 
     is ( $rs->fetch( 1 ), "FOOOOF", 'got first entry' );
     is ( $rs->fetch( 2 ), "LOOOOL", 'got second entry' );
-    warnnice (sub{$rs->fetch( 22 )},
-              undef,
-               'past end of records',
-               'fetch past end of records returns undef' );
+    is ( $rs->fetch( 22 ), undef, 'fetch past end of records returns undef' );
 
     $rs->stow( "X"x10_000, 2 );
     is ( $rs->fetch( 2 ), "X"x10_000, 'got ten zousand xsx' );
@@ -1462,10 +1459,7 @@ sub test_meta {
 
     locks $store;
 
-    warnnice (sub{$store->fetch_meta( 3 )},
-              undef,
-              'past end of records',
-              'no meta to fetch' );
+    is ($store->fetch_meta( 3 ), undef, 'no meta to fetch' );
     {
         no warnings 'redefine';
         no strict 'refs';

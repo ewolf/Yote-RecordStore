@@ -312,7 +312,6 @@ sub fetch_meta {
     }
 
     if( $id > $self->record_count ) {
-        _warn( 'fetch_meta', "fetch past end of records" );
         return undef;
     }
 
@@ -566,7 +565,6 @@ sub _fetch {
     my( $self, $id ) = @_;
 
     if( $id > $self->record_count ) {
-        warn "fetch past end of records";
         return undef;
     }
     my( $silo_id, $id_in_silo, $update_time, $creation_time ) = @{$self->[INDEX_SILO]->get_record($id)};
