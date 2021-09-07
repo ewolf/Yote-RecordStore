@@ -81,7 +81,9 @@ sub commit {
 
     my $store = $self->{store};
 
-    $store->transaction_silo->put_record( $self->{id}, [TR_IN_COMMIT], 'I' );
+    unless ($store->transaction_silo->put_record( $self->{id}, [TR_IN_COMMIT], 'I' )) {
+        return undef;
+    }
     $self->{state} = TR_IN_COMMIT;
 
     my $store_index = $store->index_silo;
@@ -92,18 +94,33 @@ sub commit {
     for my $id (sort { $a <=> $b } keys %$changes) {
         my( $action, $rec_id, $orig_silo_id, $orig_idx_in_silo, $trans_silo_id, $trans_id_in_silo ) = @{$changes->{$id}};
         if( $action == RS_ACTIVE ) {
-            $store_silos->[$trans_silo_id]->put_record( $trans_id_in_silo, [ RS_ACTIVE ], 'I' );
-            $store_index->put_record( $rec_id, [$trans_silo_id,$trans_id_in_silo,time] );
+            unless ($store_silos->[$trans_silo_id]->put_record( $trans_id_in_silo, [ RS_ACTIVE ], 'I' )) {
+                return undef;
+            }
+            unless ($store_index->put_record( $rec_id, [$trans_silo_id,$trans_id_in_silo,time] )) {
+                return undef;
+            }
         }
         else {
-            my( $s_id, $id_in_s ) = @{$store_index->get_record( $rec_id )};
-            if( $s_id ) {
-                $store->silos->[$s_id]->put_record( $id_in_s, [RS_DEAD], 'I' );
+            my $rec = $store_index->get_record( $rec_id );
+            unless ($rec) {
+                $@ = "commit - record $rec_id  not found. aborting commit";
+                return undef;
             }
-            $store_index->put_record( $rec_id, [0,0,time] );
+            my( $s_id, $id_in_s ) = @$rec;
+            if( $s_id ) {
+                unless ($store->silos->[$s_id]->put_record( $id_in_s, [RS_DEAD], 'I' )) {
+                    return undef;
+                }
+            }
+            unless ($store_index->put_record( $rec_id, [0,0,time] )) {
+                return undef;
+            }
         }
     }
-    $store->transaction_silo->put_record( $self->{id}, [TR_COMPLETE], 'I' );
+    unless ($store->transaction_silo->put_record( $self->{id}, [TR_COMPLETE], 'I' )) {
+        return undef;
+    }
 
     # this is sort of linting. The transaction is complete, but this cleans up any records marked deleted.
     for my $id (sort { $a <=> $b } keys %$changes) {
@@ -112,6 +129,7 @@ sub commit {
             $store->_vacate( $orig_silo_id, $orig_idx_in_silo );
         }
     }
+    return 1;
 } #commit
 
 sub rollback {

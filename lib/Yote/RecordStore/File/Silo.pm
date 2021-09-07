@@ -12,9 +12,6 @@ package Yote::RecordStore::File::Silo;
 # Each silo file is allowed to be only so large,
 # so that is why there may be more than one of them.
 #
-# I may be changed by async processes, so a lot
-# of my coordination and state is on the file system.
-#
 # You can init me by giving me a directory,
 # a template and an optional size and a max size.
 #   I will figure out the record size based on what you give me.
@@ -56,13 +53,12 @@ use constant {
     MAX_FILE_SIZE       => 4,
     RECORDS_PER_SUBSILO => 5,
     DIR_HANDLE          => 6,
-    SYNC                => 7,
-    CUR_COUNT           => 8,
+    CUR_COUNT           => 7,
 };
 
 
 sub open_silo {
-    my( $class, $dir, $template, $size, $max_file_size, $sync ) = @_;
+    my( $class, $dir, $template, $size, $max_file_size ) = @_;
 
     if( ! $dir ) {
         die "must supply directory to open silo";
@@ -108,7 +104,6 @@ END
         $record_size,
         $max_file_size,
         int($max_file_size / $record_size),
-        $sync,
         ], $class;
 } #open_silo
 
@@ -129,14 +124,17 @@ sub next_id {
     return $next_id;
 } #next_id
 
+sub reset {
+    my $self = shift;
+    $self->[CUR_COUNT] = undef;
+}
+
 sub entry_count {
     # return how many entries this silo has
     my $self = shift;
 
-    if ($self->[SYNC]) {
-        if (defined $self->[CUR_COUNT]) {
-            return $self->[CUR_COUNT];
-        }
+    if (defined $self->[CUR_COUNT]) {
+        return $self->[CUR_COUNT];
     }
 
     my @files = $self->subsilos;
@@ -163,7 +161,8 @@ sub get_record {
         $template = $self->[TEMPLATE];
     }
     if( $id > $self->entry_count || $id < 1 ) {
-        die "Yote::RecordStore::File::Silo->get_record : ($$) index $id out of bounds for silo $self->[DIRECTORY]. Silo has entry count of ".$self->entry_count;
+        $@ = "Yote::RecordStore::File::Silo->get_record : ($$) index $id out of bounds for silo $self->[DIRECTORY]. Silo has entry count of ".$self->entry_count;
+        return undef;
     }
     my( $idx_in_f, $fh, $subsilo_idx ) = $self->_fh( $id );
 
@@ -180,7 +179,8 @@ sub put_record {
     my( $self, $id, $data, $template, $offset ) = @_;
 
     if( $id > $self->entry_count || $id < 1 ) {
-        die "Yote::RecordStore::File::Silo->put_record : index $id out of bounds for silo $self->[DIRECTORY]. Silo has entry count of ".$self->entry_count;
+        $@ = "Yote::RecordStore::File::Silo->put_record : index $id out of bounds for silo $self->[DIRECTORY]. Silo has entry count of ".$self->entry_count;
+        return undef;
     }
     if( ! $template ) {
         $template = $self->[TEMPLATE];
@@ -193,7 +193,8 @@ sub put_record {
     my $write_size = do { use bytes; length( $to_write ) };
 
     if( $write_size > $rec_size) {
-        die "Yote::RecordStore::File::Silo->put_record : record size $write_size too large. Max is $rec_size";
+        @$ = "Yote::RecordStore::File::Silo->put_record : record size $write_size too large. Max is $rec_size";
+        return undef;
     }
 
     my( $idx_in_f, $fh, $subsilo_idx ) = $self->_fh( $id );
@@ -243,7 +244,9 @@ sub push {
     my( $self, $data ) = @_;
     my $next_id = $self->next_id;
 
-    $self->put_record( $next_id, $data );
+    unless ($self->put_record( $next_id, $data )) {
+        return undef;
+    }
 
     return $next_id;
 } #push
@@ -271,7 +274,9 @@ sub size {
 sub copy_record {
     my( $self, $from_id, $to_id ) = @_;
     my $rec = $self->get_record($from_id);
-    $self->put_record( $to_id, $rec );
+    unless ($self->put_record( $to_id, $rec )) {
+        return undef;
+    }
     return $rec;
 } #copy_record
 
@@ -376,7 +381,7 @@ sub ensure_entry_count {
     }
     undef $self->[CUR_COUNT];
     $ec = $self->entry_count;
-    return;
+    return $ec;
 } #ensure_entry_count
 
 #
@@ -513,3 +518,23 @@ __END__
 
 =cut
 
+
+= Timing experiment using cached CUR_COUNT =================
+
+---------- with CUR_COUNT --------------
+
+Done saving
+
+real	9m12.277s
+user	9m6.004s
+sys	0m5.768s
+
+---------- withOUT CUR_COUNT --------------
+
+so a tiny bit, maybe not worth it?
+
+Done saving
+
+real	9m27.667s
+user	9m21.591s
+sys	0m5.772s
