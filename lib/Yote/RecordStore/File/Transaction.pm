@@ -10,6 +10,7 @@ use warnings;
 no warnings 'numeric';
 no warnings 'uninitialized';
 
+use Carp 'longmess';
 use File::Path qw(make_path remove_tree);
 
 use vars qw($VERSION);
@@ -65,9 +66,9 @@ sub create {
 
 } #create
 
-sub _err {
+sub _warn {
     my ($method,$txt) = @_;
-    $@ = __PACKAGE__."::$method $txt";
+    warn __PACKAGE__."::$method $txt";
 }
 
 sub open {
@@ -76,7 +77,7 @@ sub open {
     my ($trans_state, $trans_obj_id) = @{$store->transaction_silo->get_record( $trans_id )};
 
     unless ($trans_obj_id) {
-        _err( 'open', 'no transaction object was recorded' );
+        _warn( 'open', 'no transaction object was recorded' );
         return undef;
     }
 
@@ -109,9 +110,8 @@ sub _save {
     my $trans_obj_template = "IIIIII" x @update_ids; 
 
     my $trans_obj_id = $store->_stow( pack( $trans_obj_template, map { @$_ } values %$updates), undef, RS_IN_TRANSACTION );
-    unless ($store->transaction_silo->put_record( $self->{trans_id}, [TR_IN_COMMIT, $trans_obj_id] ) ) {
-        return undef;
-    }
+    $store->transaction_silo->put_record( $self->{trans_id}, [TR_IN_COMMIT, $trans_obj_id] );
+
     return $trans_obj_id;
 }
 
@@ -125,11 +125,6 @@ sub commit {
 
     my $trans_obj_id = $self->_save;
 
-    # mark transaction as in commit
-    unless ($trans_obj_id) {
-        return undef;
-    }
-
     $self->{state} = TR_IN_COMMIT;
 
     my $store_index = $store->index_silo;
@@ -141,15 +136,11 @@ sub commit {
         my ($action, $rec_id, $orig_silo_id, $orig_id_in_silo, $trans_silo_id, $trans_id_in_silo ) = @{$updates->{$id}};
         if ($action == RS_ACTIVE ) {
             # create or update
-            unless ($store_index->put_record( $rec_id, [$trans_silo_id,$trans_id_in_silo], 'IL' )) {
-                return undef;
-            }
+            $store_index->put_record( $rec_id, [$trans_silo_id,$trans_id_in_silo], 'IL' );
         }
         else {
             # remove
-            unless ($store_index->put_record( $rec_id, [0,0], 'IL' )) {
-                return undef;
-            }
+            $store_index->put_record( $rec_id, [0,0], 'IL' );
         }
     }
 
@@ -164,27 +155,18 @@ sub commit {
 
         if ($action == RS_ACTIVE ) {
             # create or update
-            unless ($store_silos->[$trans_silo_id]->put_record( $trans_id_in_silo, [ RS_ACTIVE ], 'I' )) {
-                return undef;
-            }
+            $store_silos->[$trans_silo_id]->put_record( $trans_id_in_silo, [ RS_ACTIVE ], 'I' );
         }
         else {
             # remove
-            if ($orig_silo_id) {
-                # if it existed, mark it as dead in the data silo
-                unless ($store->silos->[$orig_silo_id]->put_record( $orig_id_in_silo, [RS_DEAD], 'I' )) {
-                    return undef;
-                }
-            }
+            $store->silos->[$orig_silo_id]->put_record( $orig_id_in_silo, [RS_DEAD], 'I' );
         }
     }
 
     #
     # Now mark the transaction as complete
     #
-    unless ($store->transaction_silo->put_record( $self->{trans_id}, [TR_COMPLETE], 'I' )) {
-        return undef;
-    }
+    $store->transaction_silo->put_record( $self->{trans_id}, [TR_COMPLETE], 'I' );
 
     # mark the trans object as dead
     my ($trans_obj_silo_id, $trans_obj_id_in_silo ) = @{$store->[$store->INDEX_SILO]->get_record($trans_obj_id)};
@@ -192,10 +174,8 @@ sub commit {
     $store->_mark( $trans_obj_silo_id, $trans_obj_id_in_silo, RS_DEAD );
     
     # remove the transaction itself
-    unless ($store->transaction_silo->pop) {
-        _err( 'commit', "could not remove completed transaction $@ $!" );
-        return undef;
-    }
+    $store->transaction_silo->pop;
+    $self->{trans_id} = undef;
 
     # this is sort of linting. The transaction is complete, but this cleans up any records marked deleted.
     my @update_blocks =
@@ -219,7 +199,10 @@ sub rollback {
     my $index = $store->index_silo;
     
     # check to make sure there is anything to actually roll back
-    
+    unless( $self->{trans_id} ) {
+        _warn( 'rollback', 'nothing to roll back' );
+        return undef;
+    }
 
     $store->transaction_silo->put_record( $self->{trans_id}, [TR_IN_ROLLBACK], 'I' );
 
@@ -240,10 +223,8 @@ sub rollback {
 
         my ($reported_silo_id, $id_reported_silo ) = @{$index->get_record( $rec_id )};
 
-        # update the index if there is a change of silo entry location
-        if ($reported_silo_id != $orig_silo_id || $id_reported_silo != $id_in_orig_silo ) {
-            $index->put_record( $rec_id, [$orig_silo_id,$id_in_orig_silo], "IL" );
-        }
+        # update the index
+        $index->put_record( $rec_id, [$orig_silo_id,$id_in_orig_silo], "IL" );
 
         # mark trans object as dead if it exists
         if ($trans_silo_id) {
@@ -329,12 +310,22 @@ sub stow {
 sub delete_record {
     my ($self, $id ) = @_;
     
-    delete $self->{updates}{$id};
+    if ($self->{updates}{$id} && $self->{updates}{$id}[0] == RS_DEAD) {
+        return 1;
+    }
+
+    my $added_in_transaction = delete $self->{updates}{$id};
 
     my $rec = $self->{store}->index_silo->get_record($id);
 
-    unless ($rec && $rec->[0]) {
-        _err( 'delete_record', "record $id does not have an entry to delete" );
+    unless ($rec->[0]) {
+        if ($added_in_transaction) {
+            my $store = $self->{store};
+            my ($rs,$id,$osi,$oiis,$tsi,$tiis) = @$added_in_transaction;
+            $store->_mark( $tsi, $tiis, RS_DEAD );
+        } else {
+            _warn( 'delete_record', "record $id does not have an entry to delete" );
+        }
         return undef;
     }
 

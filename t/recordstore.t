@@ -13,7 +13,7 @@ use Yote::RecordStore::File;
 use Yote::RecordStore::File::Silo;
 use File::Path qw(make_path);
 use Fcntl qw(:mode :flock SEEK_SET);
-use File::Temp qw/ :mktemp tempdir /;
+use File::Temp qw/ :mktemp tempfile tempdir /;
 use File::Path qw/ remove_tree /;
 use Scalar::Util qw(openhandle);
 use Test::More;
@@ -36,13 +36,14 @@ test_use();
 
 test_transactions();
 
-
 #test_locks();
 
 test_sillystrings();
 test_meta();
 
 test_vacate();
+
+test_misc();
 
 #api->test_failed_async( $factory );
 #api->test_transaction_async( $factory );
@@ -55,11 +56,15 @@ exit;
 
 sub failnice {
     my( $subr, $errm, $msg ) = @_;
+    local( *STDERR );
+    my $errout;
+    open( STDERR, ">>", \$errout );
     eval {
         $subr->();
         fail( "$msg fail" );
     };
     like( $@, qr/$errm/, "$msg error" );
+
     undef $@;
 }
 
@@ -93,6 +98,14 @@ sub get_rec {
     $res;
 }
 
+sub test_misc {
+    my $dir = tempdir( CLEANUP => 1 );
+    chmod 0444, $dir;
+    failnice( sub{Yote::RecordStore::File::_open( "$dir/foo" )},
+              'Permission denied',
+              'open write only file' );
+    chmod 0666, $dir;
+}
 
 sub test_vacate {
     my $dir = tempdir( CLEANUP => 1 );
@@ -200,12 +213,11 @@ sub test_vacate {
         no strict 'refs';
         no warnings 'redefine';
         local *Yote::RecordStore::File::Silo::copy_record = sub {
-            $@ = 'monkey wrench';
-            return undef;
+            die 'monkey wrench';
         };
 
-        failnice ($store->_vacate( 12, 2 ),
-                  'unable to copy record',
+        failnice (sub {$store->_vacate( 12, 2 )},
+                  'monkey wrench',
                   'vacate failed because of entries in transaction');
         is ($silo->entry_count, 4, 'still 4 silo entries' );
     }
@@ -241,12 +253,11 @@ sub test_vacate {
             local *Yote::RecordStore::File::Silo::pop = sub {
                 my $self = shift;
                 if ($self->[0] =~ /trans/) {
-                    $@ = 'monkey wrench';
-                    return undef;
+                    die 'monkey wrench';
                 }
                 $self->_pop;
             };
-            $store->commit_transaction;
+            failnice(sub{$store->commit_transaction}, 'monkey wrench', 'commit failed at pop');
 
             # must do this because the monkeypatching seems to mess with the
             # garbage collection
@@ -262,7 +273,7 @@ sub test_vacate {
         }
 
         $store = Yote::RecordStore::File->open_store( $dir );
-            is_deeply( get_rec(1, $bsilo), [$rs->RS_ACTIVE,1,7_000,$large], 'rec 1' );
+        is_deeply( get_rec(1, $bsilo), [$rs->RS_ACTIVE,1,7_000,$large], 'rec 1' );
         $silo = $store->silos->[12];
         $bsilo = $store->silos->[13];
         $isilo = $store->index_silo;
@@ -718,18 +729,28 @@ sub test_use {
         my $fail = 1;
         local *Yote::RecordStore::File::_flock = sub {
             my ($fh, $flags) = @_;
-            if ($fail) {
-                die "monkeypatch flock";
+            if (++$fail) {
+                $@ = "monkeypatch flock";
+                return undef;
             }
             flock( $fh, $flags );
         };
         failnice (sub{$rs->unlock},
-                  'monkeypatch flock',
+                  'unable to unlock',
                   'unlock fail due to monkeypatch');
 
         failnice (sub{$rs->lock},
-                  'monkeypatch flock',
+                  'unable to lock',
                   'lock fail due to monkeypatch');
+
+        $dir = tempdir( CLEANUP => 1 );
+        failnice(sub{Yote::RecordStore::File->open_store($dir)},
+                 'unable to lock',
+                 'bad flock cant open' );
+        $fail = -1;
+        failnice(sub{Yote::RecordStore::File->open_store($dir)},
+                 'unable to unlock',
+                 'bad flock cant open' );
     }
 
     $dir = tempdir( CLEANUP => 1 );
@@ -1104,16 +1125,15 @@ sub test_transactions {
         {
             local *Yote::RecordStore::File::Silo::put_record = sub {
                 if ($t++ > 1) {
-                    $@ = 'monkey';
-                    return undef;
+                    die 'monkey';
                 }
                 my $self = shift;
                 $self->_put_record( @_ );
             };
 
-            is ($store->commit_transaction, undef, 'broken commit' );
+            failnice (sub {$store->commit_transaction}, 'monkey', 'broken commit' );
 
-            is ($store->rollback_transaction, undef, 'broken rollback' );
+            failnice (sub {$store->rollback_transaction}, 'monkey', 'broken rollback' );
         }
     }
 
@@ -1134,6 +1154,9 @@ sub test_transactions {
         my $trans = $store->use_transaction;
 
         ok( $trans );
+
+        failnice (sub{$store->delete_record( 100 )}, 'out of bounds', 'could not delete entry that never existed' );
+
         is ($store->delete_record( 1 ), undef, 'could not delete entry that did not exist' );
         is ($store->stow( "BBB" ), 2, 'second id, but only for trans' );
 
@@ -1146,7 +1169,8 @@ sub test_transactions {
         is_deeply( get_rec(1, $silo), [$rs->RS_DEAD,1,4,'WOOF'], 'rec 2 after commit is first in silo' );
 
         is ($isilo->entry_count, 3, 'three index entry after commit');
-print STDERR Data::Dumper->Dump(["BREAKS HERe"]);
+print STDERR Data::Dumper->Dump(["BREAKS HERe because it has been committed, so the transaction should have its obj id removed"]);
+        
         $trans->fix;
 print STDERR Data::Dumper->Dump(["A"]);
     }
@@ -1193,7 +1217,7 @@ print STDERR Data::Dumper->Dump(["B"]);
 
             is_deeply( get_rec( 1, $silo), [ $store->RS_IN_TRANSACTION, 1, 4, 'AOOU' ], 'stowed transaction data' );
 
-            is ($store->commit_transaction, undef, 'could not commit due to monkey' );
+            failnice (sub{$store->commit_transaction}, 'monkey', 'could not commit due to monkey' );
 
             is ($isilo->entry_count, 2, '2 rec in index silo now, dead record and transaction' );
 
@@ -1220,7 +1244,46 @@ print STDERR Data::Dumper->Dump(["B"]);
 
     }
 
-    # test fix for transaction that is actually complete
+    {
+        $dir = tempdir( CLEANUP => 1 );
+        my $store = Yote::RecordStore::File->open_store( $dir );
+        locks ($store);
+        my $silo = $store->silos->[12];
+        my $bigsilo = $store->silos->[13];
+
+        $store->stow( "OOGA" );
+        $store->use_transaction;
+        is ($silo->entry_count, 1, 'one thing' );
+        is ($store->stow( "TOOA" ), 2, 'second thing' );
+        is_deeply( get_rec( 2, $silo), [ $store->RS_IN_TRANSACTION, 2, 4, 'TOOA' ], 'transaction added entry' );
+        $store->delete_record( 2 );
+        $store->delete_record( 2 );
+
+        $store->delete_record( 1 );
+        $store->delete_record( 1 );
+
+        $silo->reset;
+        is_deeply( get_rec( 2, $silo), [ $store->RS_DEAD, 2, 4, 'TOOA' ], 'transaction added then removed entry' );
+
+        $store->commit_transaction;
+        $silo->reset;
+        is_deeply( get_rec( 2, $silo), [ $store->RS_DEAD, 2, 4, 'TOOA' ], 'transaction added then removed entry after commit' );
+        is_deeply( get_rec( 1, $silo), [ $store->RS_DEAD, 1, 4, 'OOGA' ], 'transaction added then removed entry after commit' );
+    }
+
+    {
+        $dir = tempdir( CLEANUP => 1 );
+        my $store = Yote::RecordStore::File->open_store( $dir );
+        locks ($store);
+        my $silo = $store->silos->[12];
+        my $bigsilo = $store->silos->[13];
+
+        $store->stow( "OOGA" );
+        my $large = "X" x 7_000;
+        $store->stow( $large );
+        is ($bigsilo->entry_count, 1, '1 big thing' );
+        
+    }
 
 } #test_transactions
 
@@ -1251,7 +1314,8 @@ sub test_meta {
 
     locks $store;
 
-    failnice (sub{$store->fetch_meta( 3 )},
+    warnnice (sub{$store->fetch_meta( 3 )},
+              undef,
               'past end of records',
               'no meta to fetch' );
     {

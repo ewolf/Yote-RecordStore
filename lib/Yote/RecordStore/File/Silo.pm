@@ -25,8 +25,7 @@ use constant {
     RECORD_SIZE         => 3,
     MAX_FILE_SIZE       => 4,
     RECORDS_PER_SUBSILO => 5,
-    DIR_HANDLE          => 6,
-    CUR_COUNT           => 7,
+    CUR_COUNT           => 6,
 };
 
 sub _die {
@@ -129,10 +128,7 @@ sub get_record {
         _die( 'get_record', "index $id out of bounds for silo $self->[DIRECTORY]. Silo has entry count of ".$self->entry_count );
     }
     my( $idx_in_f, $fh, $subsilo_idx ) = $self->_fh( $id );
-    unless ($fh) {
-        _die( 'get_record', "Unable to open subsilo $id : $! $@" );
-    }
-
+  
     $offset //= 0;
     my $seek_pos = ( $self->[RECORD_SIZE] * $idx_in_f ) + $offset;
 
@@ -218,9 +214,7 @@ sub push {
     my( $self, $data ) = @_;
     my $next_id = $self->next_id;
 
-    unless ($self->put_record( $next_id, $data )) {
-        return undef;
-    }
+    $self->put_record( $next_id, $data );
 
     return $next_id;
 } #push
@@ -248,11 +242,7 @@ sub size {
 sub copy_record {
     my( $self, $from_id, $to_id ) = @_;
     my $rec = $self->get_record($from_id);
-
-    unless ($rec && $self->put_record( $to_id, $rec )) {
-        return undef;
-    }
-    return $rec;
+    $self->put_record( $to_id, $rec );
 } #copy_record
 
 
@@ -431,15 +421,6 @@ sub _opensilosdir {
     my $dih;
     opendir $dih, $dir;
     return $dih;
-
-    my $dh = $self->[DIR_HANDLE];
-    if( $dh ) {
-        rewinddir $dh;
-    } else {
-        opendir $dh, $dir;
-        $self->[DIR_HANDLE] = $dh;
-    }
-    return $dh;
 }
 
 "Silos are the great hidden constant of the industrialised world.
@@ -478,15 +459,11 @@ __END__
  my $newestcount = $silo->entry_count;
  $newestcount == $newcount - 1;
 
- my $reopened_silo = Yote::RecordStore::File->reopen_silo( $directory );
-
 =head1 DESCRIPTION
 
 =head1 METHODS
 
 =head2 open_silo( directory, template, record_size, max_file_size )
-
-=head2 reopen_silo( directory )
 
 =head2 next_id
 
@@ -501,6 +478,10 @@ __END__
 =head2 peek
 
 =head2 push
+
+=head2 reset 
+
+sync up this silo with the filesystem. maybe rename this 'sync'
 
 =head2 copy_record
 

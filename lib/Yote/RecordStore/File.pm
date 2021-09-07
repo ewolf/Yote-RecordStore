@@ -68,6 +68,7 @@ use warnings;
 no warnings 'numeric';
 no warnings 'uninitialized';
 
+use Carp 'longmess';
 use Data::Dumper;
 use Fcntl qw( :flock SEEK_SET );
 use File::Path qw(make_path);
@@ -115,6 +116,7 @@ use constant {
 
 sub _err {
     my ($method,$txt) = @_;
+    print STDERR Data::Dumper->Dump([longmess]);
     die __PACKAGE__."::$method $txt";
 }
 
@@ -158,7 +160,9 @@ sub open_store {
         die "Error opening lockfile '$lockfile' : $@ $!";
     }
 
-    _flock( $lock_fh, LOCK_EX );
+    unless (_flock( $lock_fh, LOCK_EX )) {
+        _err( 'open_store', 'unable to lock the recordstore' );
+    }
 
     $lock_fh->autoflush(1);
     print $lock_fh "LOCK\n";
@@ -188,14 +192,9 @@ sub open_store {
 
     my $index_silo = $cls->_open_silo( "$dir/index_silo",
                                       "ILQQ"); #silo id, id in silo, last updated time, created time
-        
-
-    $index_silo || return undef;
 
     my $transaction_index_silo = $cls->_open_silo( "$dir/transaction_index_silo",
                                                   "IL" ); #state, trans id
-
-    $transaction_index_silo || return undef;
 
     my $silos = [];
 
@@ -203,7 +202,6 @@ sub open_store {
         my $silo = $silos->[$silo_id] = $cls->_open_silo( "$silo_dir/$silo_id",
                                                          'ILLa*',  # status, id, data-length, data
                                                          2 ** $silo_id ); #size
-        $silo || return undef;
     }
 
     my $header = pack( 'ILL', 1,2,3 );
@@ -223,11 +221,15 @@ sub open_store {
         {},
         $max_silo_id,
     ], $cls;
+    $store->[IS_LOCKED] = 1;
 
     $store->_fix_transactions;
     $store->_vacuum;
 
-    _flock( $lock_fh, LOCK_UN );
+    unless (_flock( $lock_fh, LOCK_UN )) {
+        _err( 'open_store', 'unable to unlock the recordstore' );
+    }
+    $store->[IS_LOCKED] = 0;
 
     return $store;
 } #open_store
@@ -235,7 +237,11 @@ sub open_store {
 sub _open {
     my($file) = @_;
     my $exists = -e $file;
-    open my ($fh), $exists ? '+<' : '>', $file;
+    my $fh;
+    my $res = open ($fh, $exists ? '+<' : '>', $file );
+    unless ($res ) {
+        die "$@ $!";
+    }
     unless ($exists) {
         print $fh '';
     }
@@ -290,7 +296,7 @@ sub lock {
     }
 
     unless (_flock( $self->[LOCK_FH], LOCK_EX )) {
-        die "$@ $!";
+        _err( "unlock", "unable to lock $@ $!" );
     }
 
     $self->[IS_LOCKED] = 1;
@@ -313,8 +319,9 @@ sub unlock {
     }
 
     $self->[IS_LOCKED] = 0;
-    _flock( $self->[LOCK_FH], LOCK_UN ) || return undef;
-    return 1;
+    unless (_flock( $self->[LOCK_FH], LOCK_UN ) ) {
+        _err( "unlock", "unable to unlock $@ $!" );
+    }
 }
 
 sub fetch {
@@ -405,9 +412,7 @@ sub _stow {
 
     my $t = _time();
 
-    unless ($index->put_record( $id, [$new_silo_id,$new_id_in_silo, $t, $old_creation_time ? $old_creation_time : $t] )) {
-        return undef;
-    }
+    $index->put_record( $id, [$new_silo_id,$new_id_in_silo, $t, $old_creation_time ? $old_creation_time : $t] );
 
     if( $old_silo_id ) {
         $self->_mark( $old_silo_id, $old_id_in_silo, RS_DEAD );
@@ -489,10 +494,9 @@ sub commit_transaction {
         _err( 'commit_transaction',  'no transaction to commit' );
     }
 
-    if ($trans->commit) {
-        $self->[TRANSACTION] = undef;
-        return 1;
-    }
+    $trans->commit;
+    $self->[TRANSACTION] = undef;
+    return 1;
 
 } #commit_transaction
 
@@ -503,15 +507,13 @@ sub rollback_transaction {
         _err( 'rollback_transaction', "record store not locked");
     }
 
-
     my $trans = $self->[TRANSACTION];
     unless( $trans ) {
         _err( 'rollback_transaction',  'no transaction to roll back' );
     }
-    if ($trans->rollback) {
-        $self->[TRANSACTION] = undef;
-        return 1;
-    }
+    $trans->rollback;
+    $self->[TRANSACTION] = undef;
+    return 1;
 } #rollback_transaction
 
 sub index_silo {
@@ -632,9 +634,7 @@ sub _vacate {
             if( $rec_state == RS_ACTIVE ) {
                 # is active, so copy its data to the vacated position
                 # and update the index
-                unless ($silo->copy_record($rc,$id_to_empty)) {
-                    _err ('_vacate', "unable to copy record $@ $!" );
-                }
+                $silo->copy_record($rc,$id_to_empty);
                 # the following does not update the time field, it preserves it
                 $self->[INDEX_SILO]->put_record( $id, [$silo_id,$id_to_empty], "IL" );
                 $silo->pop;
