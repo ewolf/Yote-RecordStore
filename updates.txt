@@ -22,16 +22,6 @@ big bad error... sometimes fails
   ROLLBACK 2
   ok 231 - silo now with 2 items
 
-ROLLBACK 3
-ROLLBACK 2
-ROLLBACK 4
-not ok 231 - silo now with 2 items
-#   Failed test 'silo now with 2 items'
-#   at t/recordstore.t line 116.
-#          got: '3'
-#     expected: '2'
-1..231
-
   ok 226 - rec 1
   ok 227 - rec 2
   ok 228 - rec 3

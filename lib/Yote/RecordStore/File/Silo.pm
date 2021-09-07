@@ -6,6 +6,7 @@ no warnings 'uninitialized';
 no warnings 'numeric';
 no strict 'refs';
 
+use Carp 'longmess';
 use Fcntl qw( SEEK_SET );
 use File::Path qw(make_path);
 
@@ -30,6 +31,7 @@ use constant {
 
 sub _die {
     my ($method,$txt) = @_;
+    print STDERR Data::Dumper->Dump([longmess]);
     die __PACKAGE__."::$method $txt";
 }
 
@@ -280,7 +282,9 @@ sub empty_silo {
 sub unlink_silo {
     my $self = shift;
     my $dir = $self->[DIRECTORY];
-    for my $file ($self->subsilos) {
+
+    my @subs = $self->subsilos;
+    for my $file (@subs) {
         unlink "$dir/$file";
     }
     unlink "$dir/SINFO";
@@ -373,13 +377,15 @@ sub ensure_entry_count {
 sub subsilos {
     my $self = shift;
     my $dir = $self->[DIRECTORY];
-    my $dh = $self->_opensilosdir;
 
-    unless ($dh) {
-        _die( 'subsilos', "unable to open subsilo directory $dir: $! $@" );
-    }
+    _die( 'subsilos', "subsilos called on dead silo" ) unless $dir;
 
-    my( @files ) = (sort { $a <=> $b } grep { $_ eq '0' || (-s "$dir/$_") > 0 } grep { $_ > 0 || $_ eq '0' } readdir( $dh ) );
+    my $doh = $self->_opensilosdir;
+
+    _die( 'subsilos', "unable to open subsilo directory $dir: $! $@" ) unless $doh;
+
+    my( @files ) = (sort { $a <=> $b } grep { $_ eq '0' || (-s "$dir/$_") > 0 } grep { $_ > 0 || $_ eq '0' } readdir( $doh ) );
+
     return @files;
 } #subsilos
 
@@ -422,11 +428,15 @@ sub _make_path {
 sub _opensilosdir {
     my ($self) = @_;
     my $dir = $self->[DIRECTORY];
+    my $dih;
+    opendir $dih, $dir;
+    return $dih;
+
     my $dh = $self->[DIR_HANDLE];
     if( $dh ) {
         rewinddir $dh;
     } else {
-        opendir $dh, $self->[DIRECTORY];
+        opendir $dh, $dir;
         $self->[DIR_HANDLE] = $dh;
     }
     return $dh;

@@ -20,10 +20,10 @@ use constant {
     RS_DEAD      => 2,
     RS_IN_TRANSACTION => 3,
 
-    TR_ACTIVE         => 1,
-    TR_IN_COMMIT      => 2,
-    TR_IN_ROLLBACK    => 3,
-    TR_COMPLETE       => 4,
+    TR_ACTIVE         => 4,
+    TR_IN_COMMIT      => 5,
+    TR_IN_ROLLBACK    => 6,
+    TR_COMPLETE       => 7,
 };
 
 #######################################################################
@@ -52,9 +52,10 @@ use constant {
 
 
 sub create {
-    my( $cls, $store ) = @_;
+    my ($cls, $store ) = @_;
 
-    my $trans_id = $store->[$store->TRANSACTION_INDEX_SILO]->push( [TR_ACTIVE, 0] );
+    my $trans_id = $store->transaction_silo->push( [TR_ACTIVE, 0] );
+
     return bless {
         state        => TR_ACTIVE,
         store        => $store,
@@ -70,10 +71,9 @@ sub _err {
 }
 
 sub open {
-    my( $cls, $store, $trans_id ) = @_;
+    my ($cls, $store, $trans_id ) = @_;
 
-    my ($trans_state, $trans_obj_id) = @{$store->[$store->TRANSACTION_INDEX_SILO]->get_record( $trans_id ) || []};
-;
+    my ($trans_state, $trans_obj_id) = @{$store->transaction_silo->get_record( $trans_id )};
 
     unless ($trans_obj_id) {
         _err( 'open', 'no transaction object was recorded' );
@@ -98,8 +98,7 @@ sub open {
     }, $cls;
 }
 
-
-sub commit {
+sub _save {
     my $self = shift;
 
     my $store = $self->{store};
@@ -109,10 +108,25 @@ sub commit {
 
     my $trans_obj_template = "IIIIII" x @update_ids; 
 
-    my $trans_obj_id = $store->_stow( pack( $trans_obj_template, map { @$_ } values %$updates) );
+    my $trans_obj_id = $store->_stow( pack( $trans_obj_template, map { @$_ } values %$updates), undef, RS_IN_TRANSACTION );
+    unless ($store->transaction_silo->put_record( $self->{trans_id}, [TR_IN_COMMIT, $trans_obj_id] ) ) {
+        return undef;
+    }
+    return $trans_obj_id;
+}
+
+sub commit {
+    my $self = shift;
+
+    my $store = $self->{store};
+
+    my $updates = $self->{updates};
+    my @update_ids = keys %$updates;
+
+    my $trans_obj_id = $self->_save;
 
     # mark transaction as in commit
-    unless ($store->transaction_silo->put_record( $self->{trans_id}, [TR_IN_COMMIT, $trans_obj_id] )) {
+    unless ($trans_obj_id) {
         return undef;
     }
 
@@ -124,8 +138,8 @@ sub commit {
     # first update the index
     # 
     for my $id (@update_ids) {
-        my( $action, $rec_id, $orig_silo_id, $orig_id_in_silo, $trans_silo_id, $trans_id_in_silo ) = @{$updates->{$id}};
-        if( $action == RS_ACTIVE ) {
+        my ($action, $rec_id, $orig_silo_id, $orig_id_in_silo, $trans_silo_id, $trans_id_in_silo ) = @{$updates->{$id}};
+        if ($action == RS_ACTIVE ) {
             # create or update
             unless ($store_index->put_record( $rec_id, [$trans_silo_id,$trans_id_in_silo], 'IL' )) {
                 return undef;
@@ -139,13 +153,16 @@ sub commit {
         }
     }
 
-
+    my (%silo_ids);
     #
     # now update the data silo records to make these active
     # 
     for my $id (@update_ids) {
-        my( $action, $rec_id, $orig_silo_id, $orig_id_in_silo, $trans_silo_id, $trans_id_in_silo ) = @{$updates->{$id}};
-        if( $action == RS_ACTIVE ) {
+        my ($action, $rec_id, $orig_silo_id, $orig_id_in_silo, $trans_silo_id, $trans_id_in_silo ) = @{$updates->{$id}};
+        $silo_ids{$trans_silo_id} = 1;
+        $silo_ids{$orig_silo_id} = 1;
+
+        if ($action == RS_ACTIVE ) {
             # create or update
             unless ($store_silos->[$trans_silo_id]->put_record( $trans_id_in_silo, [ RS_ACTIVE ], 'I' )) {
                 return undef;
@@ -170,25 +187,29 @@ sub commit {
     }
 
     # mark the trans object as dead
-    my( $trans_obj_silo_id, $trans_obj_id_in_silo ) = @{$store->[$store->INDEX_SILO]->get_record($trans_obj_id)};
-    $store->silos->[$trans_obj_silo_id]->put_record( $trans_obj_id_in_silo, [RS_DEAD], 'I' );
-
-    # vacate the trans_obj_id
-    $store->_vacate( $trans_obj_silo_id, $trans_obj_id_in_silo );
+    my ($trans_obj_silo_id, $trans_obj_id_in_silo ) = @{$store->[$store->INDEX_SILO]->get_record($trans_obj_id)};
+    
+    $store->_mark( $trans_obj_silo_id, $trans_obj_id_in_silo, RS_DEAD );
+    
+    # remove the transaction itself
+    unless ($store->transaction_silo->pop) {
+        _err( 'commit', "could not remove completed transaction $@ $!" );
+        return undef;
+    }
 
     # this is sort of linting. The transaction is complete, but this cleans up any records marked deleted.
-
     my @update_blocks =
                sort { $b->[3] <=> $a->[3] }
                map { $updates->{$_} }
                @update_ids;
 
     for my $block (@update_blocks) {
-        my( $action, $rec_id, $orig_silo_id, $orig_id_in_silo ) = @$block;
-        if( $orig_silo_id ) {
-           $store->_vacate( $orig_silo_id, $orig_id_in_silo );
+        my ($action, $rec_id, $orig_silo_id, $orig_id_in_silo ) = @$block;
+        if ($orig_silo_id ) {
+            $store->_mark( $orig_silo_id, $orig_id_in_silo, RS_DEAD );
         }
     }
+
     return 1;
 } #commit
 
@@ -196,8 +217,12 @@ sub rollback {
     my $self = shift;
     my $store = $self->{store};
     my $index = $store->index_silo;
+    
+    # check to make sure there is anything to actually roll back
+    
 
-    $store->transaction_silo->put_record( $self->{id}, [TR_IN_ROLLBACK], 'I' );
+    $store->transaction_silo->put_record( $self->{trans_id}, [TR_IN_ROLLBACK], 'I' );
+
     $self->{state} = TR_IN_ROLLBACK;
 
     # [RS_ACTIVE, $id, $orig_silo_id, $orig_id_in_silo, $trans_silo_id, $trans_id_in_silo];
@@ -206,42 +231,49 @@ sub rollback {
     my $updates = $self->{updates};
     my @update_ids = keys %$updates;
 
-    # must be sorted so that the ones on the ends of the silos get removed first
-    # otherwise, an earlier can try to swap out with a later one and the later one wont move
-    my @sorted_update_blocks = 
-        sort { $b->[5] <=> $a->[5] }
+    my @update_blocks = 
         map { $updates->{$_} } 
         keys %$updates;
 
-    for my $block (@sorted_update_blocks) {
-        my( $action, $rec_id, $orig_silo_id, $id_in_orig_silo, $trans_silo_id, $trans_id_in_silo ) = @$block;
+    for my $block (@update_blocks) {
+        my ($action, $rec_id, $orig_silo_id, $id_in_orig_silo, $trans_silo_id, $trans_id_in_silo ) = @$block;
 
-#    for my $id (@update_ids) {
-#        print STDERR "ROLLBACK $id\n";
-#        my( $action, $rec_id, $orig_silo_id, $id_in_orig_silo, $trans_silo_id, $trans_id_in_silo ) = @{$updates->{$id}};
-        my( $reported_silo_id, $id_reported_silo ) = @{$index->get_record( $rec_id )};
-        if( $reported_silo_id != $orig_silo_id || $id_reported_silo != $id_in_orig_silo ) {
-            $index->put_record( $rec_id, [$orig_silo_id,$id_in_orig_silo], "IL" );            
+        my ($reported_silo_id, $id_reported_silo ) = @{$index->get_record( $rec_id )};
+
+        # update the index if there is a change of silo entry location
+        if ($reported_silo_id != $orig_silo_id || $id_reported_silo != $id_in_orig_silo ) {
+            $index->put_record( $rec_id, [$orig_silo_id,$id_in_orig_silo], "IL" );
         }
-        if( $trans_silo_id ) {
-            $store->_vacate( $trans_silo_id, $trans_id_in_silo );
+
+        # mark trans object as dead if it exists
+        if ($trans_silo_id) {
+            $store->_mark( $trans_silo_id, $trans_id_in_silo, RS_DEAD );
         }
     }
 
-    $store->transaction_silo->put_record( $self->{id}, [TR_COMPLETE], 'I' );
+    # mark the trans object as dead
+    if ($self->{trans_obj_id}) {
+        my ( $trans_obj_silo_id, $trans_obj_id_in_silo ) = @{$store->[$store->INDEX_SILO]->get_record($self->{trans_obj_id})};
+        $store->_mark( $trans_obj_silo_id, $trans_obj_id_in_silo, RS_DEAD );
+    }
+
+    $store->transaction_silo->put_record( $self->{trans_id}, [TR_COMPLETE], 'I' );
+
+    $store->transaction_silo->pop;
+
     $self->{state} = TR_COMPLETE;
     return 1;
 } #rollback
 
 sub fetch {
-    my( $self, $id ) = @_;
+    my ($self, $id ) = @_;
 
     my $store = $self->{store};
 
     my $updates = $self->{updates};
-    if( my $rec = $updates->{$id} ) {
-        my( $action, $rec_id, $a, $b, $trans_silo_id, $trans_id_in_silo ) = @$rec;    
-        if( $action == RS_ACTIVE ) {
+    if (my $rec = $updates->{$id} ) {
+        my ($action, $rec_id, $a, $b, $trans_silo_id, $trans_id_in_silo ) = @$rec;    
+        if ($action == RS_ACTIVE ) {
             my $ret = $store->silos->[$trans_silo_id]->get_record( $trans_id_in_silo );
             return substr( $ret->[3], 0, $ret->[2] );
         }
@@ -276,7 +308,8 @@ sub stow {
     my ($self, $data, $id ) = @_;
 
     my $store = $self->{store};
-    if( $id == 0 ) {
+
+    if ($id == 0 ) {
         $id = $store->next_id;
     }
 
@@ -284,24 +317,28 @@ sub stow {
     my $trans_silo_id = $store->_silo_id_for_size( $data_write_size );
 
     my $trans_silo = $store->silos->[$trans_silo_id];
-    my( $orig_silo_id, $orig_id_in_silo ) = @{$store->index_silo->get_record($id)};
+    my ($orig_silo_id, $orig_id_in_silo ) = @{$store->index_silo->get_record($id)};
     my $trans_id_in_silo = $trans_silo->push( [RS_IN_TRANSACTION, $id, $data_write_size, $data] );
-
     my $update = [RS_ACTIVE,$id,$orig_silo_id,$orig_id_in_silo,$trans_silo_id,$trans_id_in_silo];
+
     $self->{updates}{$id} = $update;
 
     return $id;
 } #stow
 
 sub delete_record {
-    my( $self, $id ) = @_;
+    my ($self, $id ) = @_;
     
     delete $self->{updates}{$id};
 
-    my( $orig_silo_id, $orig_id_in_silo ) = @{$self->{store}->index_silo->get_record($id)};
-    unless ($orig_silo_id) {
+    my $rec = $self->{store}->index_silo->get_record($id);
+
+    unless ($rec && $rec->[0]) {
+        _err( 'delete_record', "record $id does not have an entry to delete" );
         return undef;
     }
+
+    my ($orig_silo_id, $orig_id_in_silo ) = @$rec;
     
     my $update = [RS_DEAD,$id,$orig_silo_id,$orig_id_in_silo,0,0];
     $self->{updates}{$id} = $update;

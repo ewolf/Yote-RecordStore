@@ -30,11 +30,35 @@ exit( 0 );
 
 sub failnice {
     my( $subr, $errm, $msg ) = @_;
+    local( *STDERR );
+    my $errout;
+    open( STDERR, ">>", \$errout );
     eval {
         $subr->();
     };
     like( $@, qr/$errm/, "$msg error" );
+    like( $errout, qr/$errm/, "$msg stdout" );
     undef $@;
+}
+
+sub noSTDERR {
+    my( $subr ) = @_;
+    local( *STDERR );
+    my $errout;
+    open( STDERR, ">>", \$errout );
+    eval {$subr->();};
+}
+
+
+sub warnnice {
+    my( $subr, $val, $errm, $msg ) = @_;
+    local( *STDERR );
+    my $errout;
+    open( STDERR, ">>", \$errout );
+    is ($subr->(), $val, "$msg value" );
+    if ($errm) {
+        like( $errout, qr/$errm/, "$msg error" );
+    }
 }
 
 sub test_init {
@@ -281,10 +305,11 @@ sub test_use {
         }
         
     }
-
-    $silo->unlink_silo;
-
-    is_deeply( [$silo->subsilos], [], "no subsilos after unlink silo" );
+    $silo->unlink_silo; 
+    failnice( sub { $silo->subsilos },
+              'dead silo',
+              'subsilos called on dead silo',
+        );
 
     $dir = tempdir( CLEANUP => 1 );
     $size = 2 ** 10;

@@ -21,7 +21,7 @@ use Test::More;
 
 
 use Carp;
-$SIG{ __DIE__ } = sub { Carp::confess( @_ ) }; 
+#$SIG{ __DIE__ } = sub { Carp::confess( @_ ) };
 
 my $is_root = `whoami` =~ /root/;
 
@@ -54,16 +54,42 @@ done_testing;
 exit;
 
 sub failnice {
-    my( $res, $errm, $msg ) = @_;
-    is ($res, undef, $msg );
+    my( $subr, $errm, $msg ) = @_;
+    eval {
+        $subr->();
+        fail( "$msg fail" );
+    };
     like( $@, qr/$errm/, "$msg error" );
     undef $@;
 }
 
+sub warnnice {
+    my( $subr, $val, $errm, $msg ) = @_;
+    local( *STDERR );
+    my $errout;
+    open( STDERR, ">>", \$errout );
+    is ($subr->(), $val, "$msg value" );
+    like( $errout, qr/$errm/, "$msg error" );
+}
+
+sub noSTDERR {
+    my( $subr ) = @_;
+    local( *STDERR );
+    my $errout;
+    open( STDERR, ">>", \$errout );
+    $subr->();
+}
+
+
 sub get_rec {
-    my( $id, $silo) = @_;
+    my( $id, $silo, $limit) = @_;
     my $res = $silo->get_record($id);
-    $res->[3] = substr( $res->[3], 0, $res->[2] );
+    if (@$res > 3) {
+        $res->[3] = substr( $res->[3], 0, $res->[2] );
+    }
+    if ($limit) {
+        return [@$res[0..($limit-1)]];
+    }
     $res;
 }
 
@@ -92,29 +118,29 @@ sub test_vacate {
     my $trans = $rs->[$rs->TRANSACTION];
     $rs->[$rs->TRANSACTION] = undef;
 
-    unlocks ($rs);
-
-    locks ($rs);
-
-    my $id = $rs->stow( "GOING" );
-    unlocks ($rs);
+    $id = $rs->stow( "GOING" );
 
     is ($silo->entry_count, 5, 'silo with 5 items' );
-    
+
     is_deeply( get_rec(1, $silo), [$rs->RS_ACTIVE,1,4,'ZERO'], 'rec 1' );
     is_deeply( get_rec(2, $silo), [$rs->RS_IN_TRANSACTION,2,3,'ONE'], 'rec 2' );
     is_deeply( get_rec(3, $silo), [$rs->RS_IN_TRANSACTION,3,3,'TWO'], 'rec 3' );
     is_deeply( get_rec(4, $silo), [$rs->RS_IN_TRANSACTION,4,5,'THREE'], 'rec 4' );
     is_deeply( get_rec(5, $silo), [$rs->RS_ACTIVE,5,5,'GOING'], 'rec 5' );
 
+    # simulate transaction saved but not carried out
+    ok ($trans->_save, 'trans could save');
+    is ($silo->entry_count, 6, 'silo with 6 items after trans save' );
+
     # silo with [ ZERO, xx, xx, xx, GOING ]
     # with vacate should go to
     # silo with [ ZERO, GOING ]
     #$rs->_vacate( 12, 2 );
-    $trans->rollback;
+    is ($trans->rollback, 1, 'rolled back' );
 
     $silo->reset;
-    is ($silo->entry_count, 2, 'silo now with 2 items' );
+
+    is ($rs->transaction_silo->entry_count, 0, 'no entries in trans silo post rollback' );
 
     {
         # test an interrupted stow with items marked RS_IN_TRANSACTION
@@ -122,7 +148,7 @@ sub test_vacate {
         my $store = Yote::RecordStore::File->open_store( $dir );
 
         locks ($store);
-        
+
         $store->stow( "A" );
 
         $store->use_transaction;
@@ -141,11 +167,7 @@ sub test_vacate {
         is_deeply( get_rec(3, $silo), [$rs->RS_IN_TRANSACTION,3,2,'TC'], 'rec 3' );
         is_deeply( get_rec(4, $silo), [$rs->RS_IN_TRANSACTION,4,2,'TD'], 'rec 4' );
         is ($silo->entry_count, 4, '4 silo entries' );
-        
-        failnice ($store->_vacate( 12, 2 ), 
-                  "got record state ".$rs->RS_IN_TRANSACTION.". not popping",
-                  'vacate failed because of entries in transaction');
-        is ($silo->entry_count, 4, '4 silo entries' );
+
     }
 
     {
@@ -155,7 +177,7 @@ sub test_vacate {
         my $store = Yote::RecordStore::File->open_store( $dir );
 
         locks ($store);
-        
+
         $store->stow( "A" );
 
         $store->use_transaction;
@@ -164,7 +186,8 @@ sub test_vacate {
         $store->stow( "TC" );
         $store->stow( "TD" );
 
-        $store->commit_transaction;
+        ok ($store->commit_transaction, 'could commit trans' );
+        is ($store->transaction_silo->entry_count, 0, 'no entries in trans silo post commit' );
 
         my $silo = $store->silos->[12];
 
@@ -173,7 +196,6 @@ sub test_vacate {
         is_deeply( get_rec(2, $silo), [$rs->RS_ACTIVE,2,2,'TB'], 'rec 2' );
         is_deeply( get_rec(3, $silo), [$rs->RS_ACTIVE,3,2,'TC'], 'rec 3' );
         is_deeply( get_rec(4, $silo), [$rs->RS_ACTIVE,4,2,'TD'], 'rec 4' );
-        is ($silo->entry_count, 4, '4 silo entries' );
 
         no strict 'refs';
         no warnings 'redefine';
@@ -181,14 +203,77 @@ sub test_vacate {
             $@ = 'monkey wrench';
             return undef;
         };
-        
-        failnice ($store->_vacate( 12, 2 ), 
+
+        failnice ($store->_vacate( 12, 2 ),
                   'unable to copy record',
                   'vacate failed because of entries in transaction');
         is ($silo->entry_count, 4, 'still 4 silo entries' );
     }
 
-    
+    {
+        # test a transaction that gets to the marked completed stage, but doesn't do the cleanup steps
+        # after that
+        $dir = tempdir( CLEANUP => 1 );
+
+
+        my $store = Yote::RecordStore::File->open_store( $dir );
+
+        my $silo = $store->silos->[12];
+        my $bsilo = $store->silos->[13];
+        my $isilo = $store->index_silo;
+        my $tsilo = $store->transaction_silo;
+
+        my $large = "X" x 7_000;
+        {
+            locks ($store);
+
+            ok ($store->use_transaction, 'use trans' );
+
+            is ($tsilo->entry_count, 1, 'one trans' );
+
+            $store->stow( $large );
+
+            is ($silo->entry_count, 0, 'nothing in small silo' );
+            is ($bsilo->entry_count, 1, 'one big store' );
+
+            no strict 'refs';
+            no warnings 'redefine';
+            local *Yote::RecordStore::File::Silo::pop = sub {
+                my $self = shift;
+                if ($self->[0] =~ /trans/) {
+                    $@ = 'monkey wrench';
+                    return undef;
+                }
+                $self->_pop;
+            };
+            $store->commit_transaction;
+
+            # must do this because the monkeypatching seems to mess with the
+            # garbage collection
+            $store->[$store->TRANSACTION] = undef;
+            unlocks ( $store );
+
+            # check the state, shoud have one competed transaction
+            is ( $bsilo->entry_count, 1, 'only one thing in big silo' );
+            is ( $silo->entry_count, 1, 'only one uncleaned up thing in silo' );
+            is_deeply( get_rec(1, $bsilo), [$rs->RS_ACTIVE,1,7_000,$large], 'rec 1' );
+            is_deeply( get_rec(1, $silo), [$rs->RS_DEAD,2, 24, pack ("IIIIII", $store->RS_ACTIVE,1,0,0,13,1 )], 'dead trans obj' );
+
+        }
+
+        $store = Yote::RecordStore::File->open_store( $dir );
+            is_deeply( get_rec(1, $bsilo), [$rs->RS_ACTIVE,1,7_000,$large], 'rec 1' );
+        $silo = $store->silos->[12];
+        $bsilo = $store->silos->[13];
+        $isilo = $store->index_silo;
+        $tsilo = $store->transaction_silo;
+
+        is ( $bsilo->entry_count, 1, 'only one thing in big silo' );
+        is ( $silo->entry_count, 0, 'things cleaned up in silo' );
+
+        is_deeply( get_rec(1, $bsilo), [$rs->RS_ACTIVE,1,7_000,$large], 'rec 1' );
+    }
+
 }
 
 sub test_init {
@@ -380,52 +465,53 @@ sub test_use {
     my $dir = tempdir( CLEANUP => 1 );
     my $rs = Yote::RecordStore::File->open_store($dir);
 
-    failnice ($rs->record_count ,
+    failnice (sub {$rs->record_count},
                'store not locked',
                'cant use record_count until store is locked' );
 
-    failnice ($rs->active_entry_count ,
+    failnice (sub{$rs->active_entry_count},
                'store not locked',
                'cant use active_entry_count until store is locked' );
 
-    failnice ($rs->stow( "THE FIRST" ) ,
+    failnice (sub{$rs->stow( "THE FIRST" )},
                'store not locked',
                'cant use stow until store is locked' );
 
-    failnice ($rs->fetch(1) ,
+    failnice (sub{$rs->fetch(1)},
                'store not locked',
                'cant use fetch until store is locked' );
 
-    failnice ($rs->fetch_meta(1) ,
+    failnice (sub{$rs->fetch_meta(1)},
                'store not locked',
                'cant use fetch_meta until store is locked' );
 
-    failnice ($rs->unlock(1) ,
-               'store not locked',
-               'cant use unlock until store is locked' );
+    warnnice (sub{$rs->unlock(1)},
+              1,
+              'store not locked',
+              'cant use unlock until store is locked' );
 
-    failnice ($rs->next_id ,
+    failnice (sub{$rs->next_id},
                'store not locked',
                'cant use next_id until store is locked' );
 
-    failnice ($rs->delete_record(12) ,
+    failnice (sub{$rs->delete_record(12)},
                'store not locked',
                'cant use delete_record until store is locked' );
 
-    failnice ($rs->silos_entry_count ,
+    failnice (sub{$rs->silos_entry_count},
                'store not locked',
                'cant use silos_entry_count until store is locked' );
 
 
-    failnice ($rs->use_transaction ,
+    failnice (sub{$rs->use_transaction},
                'store not locked',
                'cant use use_transaction until store is locked' );
 
-    failnice ($rs->commit_transaction ,
+    failnice (sub{$rs->commit_transaction},
                'store not locked',
                'cant use commit_transaction until store is locked' );
 
-    failnice ($rs->rollback_transaction ,
+    failnice (sub{$rs->rollback_transaction},
                'store not locked',
                'cant use rollback_transaction until store is locked' );
 
@@ -438,24 +524,24 @@ sub test_use {
     ok ($rs->lock, 'able to lock record store');
     is ( $rs->is_locked, 1, 'now locked' );
 
-    failnice ($rs->rollback_transaction ,
+    failnice (sub{$rs->rollback_transaction},
                'no transaction',
                'cant use rollback_transaction until store is locked' );
 
 
-    failnice ($rs->delete_record(12) ,
+    failnice (sub{$rs->delete_record(12)},
                'past end of',
                'cant use delete_record until store is locked' );
 
-    failnice ($rs->stow("GAWOOOUUNGA", 0) ,
+    failnice (sub{$rs->stow("GAWOOOUUNGA", 0)},
                'must be a positive integer',
                'cant use delete_record until store is locked' );
 
-    failnice ($rs->stow("GAWOOOUUNGA", 1.5) ,
+    failnice (sub{$rs->stow("GAWOOOUUNGA", 1.5)},
                'must be a positive integer',
                'cant use delete_record until store is locked' );
 
-    failnice ($rs->stow("GAWOOOUUNGA", -2) ,
+    failnice (sub{$rs->stow("GAWOOOUUNGA", -2)},
                'must be a positive integer',
                'cant use delete_record until store is locked' );
 
@@ -474,7 +560,8 @@ sub test_use {
 
     is ( $rs->fetch( 1 ), "FOOOOF", 'got first entry' );
     is ( $rs->fetch( 2 ), "LOOOOL", 'got second entry' );
-    failnice ($rs->fetch( 22 ),
+    warnnice (sub{$rs->fetch( 22 )},
+              undef,
                'past end of records',
                'fetch past end of records returns undef' );
 
@@ -513,7 +600,7 @@ sub test_use {
 
 
     my $silo = $rs->silos->[12];
-    
+
     is_deeply( get_rec(1, $silo), [$rs->RS_ACTIVE,1,5,'ZIPPO'], 'rec 1' );
     is_deeply( get_rec(2, $silo), [$rs->RS_ACTIVE,2,5,'BLINK'], 'rec 2' );
     is_deeply( get_rec(3, $silo), [$rs->RS_ACTIVE,3,3,'ZAP'], 'rec 3' );
@@ -525,8 +612,9 @@ sub test_use {
     # A B C D E F
 
     $rs->delete_record( $d1 );
+
     # F B C D E
-    is_deeply( get_rec(1, $silo), [$rs->RS_ACTIVE,6,4,'SOOZ'], 'rec 1' );
+    is_deeply( get_rec(1, $silo), [$rs->RS_DEAD,1,5,'ZIPPO'], 'rec 1' );
     is_deeply( get_rec(2, $silo), [$rs->RS_ACTIVE,2,5,'BLINK'], 'rec 2' );
     is_deeply( get_rec(3, $silo), [$rs->RS_ACTIVE,3,3,'ZAP'], 'rec 3' );
     is_deeply( get_rec(4, $silo), [$rs->RS_ACTIVE,4,5,'XZOOR'], 'rec 4' );
@@ -534,20 +622,15 @@ sub test_use {
 
     is ( $rs->record_count, 6, "still 6 entires after deleting penultimate" );
     is ( $rs->active_entry_count, 5, "5 active items in silos after delete" );
-    is ( $rs->silos_entry_count, 5, "now 5 items in silos after " );
-
     $rs->delete_record( $d2 );
 
     # F B C E
     is ( $rs->record_count, 6, "still 6 entires after deleting penultimate" );
     is ( $rs->active_entry_count, 4, "4 active items in silos after delete" );
-    is ( $rs->silos_entry_count, 4, "now 4 items in silos after " );
-
     $rs->delete_record( $d3 );
     # F B C
     is ( $rs->record_count, 6, "still 6 entires after deleting penultimate" );
     is ( $rs->active_entry_count, 3, "3 active items in silos after delete" );
-    is ( $rs->silos_entry_count, 3, "now 3 items in silos after " );
 
     ok ($rs->lock, "got lock");
     is (flock( $rs->[Yote::RecordStore::File->LOCK_FH], LOCK_NB || LOCK_EX ), 0, 'unable to lock already locked fh' );
@@ -564,13 +647,13 @@ sub test_use {
                 $$err = [{$dir => "monkeypatch $msg"}];
                 return;
             }
-            make_path( $dir, { error => \$err } );
+            make_path( $dir, { error => $err } );
         };
 
-        failnice (Yote::RecordStore::File->open_store($trydir),
+        failnice (sub{Yote::RecordStore::File->open_store($trydir)},
                   'monkeypatch base', 'no base dir' );
         $breakon = 'silo';
-        failnice (Yote::RecordStore::File->open_store($trydir),
+        failnice (sub{Yote::RecordStore::File->open_store($trydir)},
                   'monkeypatch silo', 'no silo dir' );
     }
 
@@ -581,8 +664,7 @@ sub test_use {
         local *Yote::RecordStore::File::_open_silo = sub {
             my ($self, $silo_file, $template, $size, $max_file_size ) = @_;
             if ($silo_file =~ qr/${breakon}$/) {
-                $@ = "monkeypatch $breakon";
-                return undef;
+                die "monkeypatch $breakon";
             }
             return Yote::RecordStore::File::Silo->open_silo( $silo_file,
                                                              $template,
@@ -590,21 +672,15 @@ sub test_use {
                                                              $max_file_size );
         };
 
-        is (Yote::RecordStore::File->open_store($dir), undef, 'no index silo' );
-        like ($@, qr/monkeypatch index_silo/, 'no index silo message');
-        undef $@;
+        failnice (sub{Yote::RecordStore::File->open_store($dir)}, 'monkeypatch index_silo', 'no index silo' );
 
         $breakon = 'transaction_index_silo';
-        is (Yote::RecordStore::File->open_store($dir), undef, 'no transaction index silo' );
-        like ($@, qr/monkeypatch transaction_index_silo/, 'no transaction silo message');
-        undef $@;
+        failnice (sub {Yote::RecordStore::File->open_store($dir)}, 'monkeypatch transaction_index_silo', 'no transaction index silo' );
 
         $breakon = '12';
-        is (Yote::RecordStore::File->open_store($dir), undef, 'no data silo' );
-        like ($@, qr/monkeypatch 12/, 'no data silo message');
-        undef $@;
+        failnice (sub {Yote::RecordStore::File->open_store($dir)}, 'monkeypatch 12', 'no data silo' );
     }
-    
+
 
     {
         ok (-e "$dir/LOCK", "lock file exists");
@@ -612,30 +688,24 @@ sub test_use {
         no strict 'refs';
         no warnings 'redefine';
         local *Yote::RecordStore::File::_openhandle = sub {
-            $@ = "monkeypatch _openhandle";
+            warn "monkeypatch _openhandle";
             return undef;
         };
-        
-        ok ($rs->lock, "got lock with filehandle closed");
-        like ($@, qr/monkeypatch _openhandle/, 'openhandle failed message');
-        undef $@;
+
+        warnnice (sub{$rs->lock}, 1, 'monkeypatch _openhandle', "got lock with filehandle closed");
         is (flock( $rs->[Yote::RecordStore::File->LOCK_FH], LOCK_NB || LOCK_EX ), 0, 'unable to lock already locked fh filehandle closed' );
         ok ($rs->unlock, "unlock filehandle");
-
         unlink "$dir/LOCK";
-        ok ($rs->lock, "got lock with filehandle closed and lockfile removed");
-        like ($@, qr/monkeypatch _openhandle/, 'openhandle failed message');
-        undef $@;
+        warnnice( sub{$rs->lock}, 1, 'monkeypatch _openhandle', "got lock with filehandle closed and lockfile removed");
 
         ok (-e "$dir/LOCK", "lock file regenerated");
         is (flock( $rs->[Yote::RecordStore::File->LOCK_FH], LOCK_NB || LOCK_EX ), 0, 'unable to lock already locked fh filehandle closed' );
         ok ($rs->unlock, "unlock filehandle");
-        
         local *Yote::RecordStore::File::_open = sub {
             $@ = 'monkeypatch _open ';
             return undef;
         };
-        failnice ($rs->lock, 'monkeypatch _open', "lock fail with open fail");
+        failnice (sub{$rs->lock}, 'monkeypatch _open', "lock fail with open fail");
     }
     {
         ok (-e "$dir/LOCK", "lock file exists");
@@ -649,16 +719,15 @@ sub test_use {
         local *Yote::RecordStore::File::_flock = sub {
             my ($fh, $flags) = @_;
             if ($fail) {
-                $@ = "monkeypatch flock";
-                return undef;
+                die "monkeypatch flock";
             }
             flock( $fh, $flags );
         };
-        failnice ($rs->unlock, 
+        failnice (sub{$rs->unlock},
                   'monkeypatch flock',
                   'unlock fail due to monkeypatch');
 
-        failnice ($rs->lock, 
+        failnice (sub{$rs->lock},
                   'monkeypatch flock',
                   'lock fail due to monkeypatch');
     }
@@ -670,7 +739,7 @@ sub test_use {
     open my $in, '>', "$dir/deeper/VERSION";
     print $in "5.0";
     close $in;
-    failnice( Yote::RecordStore::File->open_store("$dir/deeper"),
+    failnice( sub{Yote::RecordStore::File->open_store("$dir/deeper")},
               'Cannot open recordstore.*with version 5.0',
               'no opening previous version error msg');
     {
@@ -692,7 +761,7 @@ sub test_use {
             return $fh;
         };
         $dir = tempdir( CLEANUP => 1 );
-        failnice( Yote::RecordStore::File->open_store("$dir/deeper"),
+        failnice( sub{Yote::RecordStore::File->open_store("$dir/deeper")},
                   'Error opening lockfile.*monkeypatch',
                   'make record store fail on lock' );
     }
@@ -711,19 +780,18 @@ sub test_use {
         no strict 'refs';
         no warnings 'redefine';
         local *Yote::RecordStore::File::Silo::put_record = sub {
-            $@ = 'monkeypatch put';
-            return undef;
+            die 'monkeypatch put';
         };
-        failnice ($rs->stow("NYET"),
+        failnice (sub{$rs->stow("NYET")},
                   'monkeypatch put',
                   'No id for monkied put record on stow' );
 
-        failnice ($rs->delete_record(1),
+        failnice (sub{$rs->delete_record(1)},
                   'monkeypatch put',
                   'No id for monkied put record on delete' );
     }
     is ($@, undef, 'BEEEE');
-    
+
 } #test_use
 
 sub unlocks {
@@ -756,12 +824,12 @@ sub test_transactions {
 
     locks ($rs);
     ok (!$@, 'no error after lock');
-    failnice ($rs->rollback_transaction,
-              'no transaction to roll back', 
+    failnice (sub{$rs->rollback_transaction},
+              'no transaction to roll back',
               'cant roll back without transaction' );
 
-    failnice ($rs->commit_transaction, 
-              'no transaction to commit', 
+    failnice (sub{$rs->commit_transaction},
+              'no transaction to commit',
               "cant commit without transaction" );
 
     is ( $rs->transaction_silo->entry_count, 0, 'trans silo starts with no count' );
@@ -771,10 +839,11 @@ sub test_transactions {
     locks ($copy);
     is ( $copy->transaction_silo->entry_count, 0, 'copy trans silo starts with no count' );
     unlocks ($copy);
-    
+
     locks ($rs);
     ok ($rs->use_transaction(), 'use transaction' );
 
+    failnice (sub{$rs->delete_record( 12 )}, 'out of bounds', 'could not delete entry that did not exist' );
     eval {
         local( *STDERR );
         my $errout;
@@ -785,7 +854,7 @@ sub test_transactions {
     };
 
     is ( $rs->transaction_silo->entry_count, 1, 'trans silo now with one count' );
-    failnice ($rs->unlock,
+    failnice (sub{$rs->unlock},
               'may not unlock with a pending',
               'cant unlock store with active transaction' );
 
@@ -854,286 +923,12 @@ sub test_transactions {
     $rs->rollback_transaction;
     is ($rs->fetch( $newid), "OH LETS CHANGE THIS UP", 'deletion rolled back' );
 
-# return;
-#     my $nid = $rs->stow( "FORGRABS" );
-#     $copy->_reset;
-#     my $nextid = $copy->next_id;
-#     is ( $nextid, 1 + $nid, 'copy gets one id further than trans store' );
-#     is ( $rs->fetch( $nid ), "FORGRABS", "correct new value assigned id" );
-#     is ( $copy->fetch( $nid ), undef, "copy still cant see commit value" );
-
-#     $rs->delete_record( $nid );
-#     is ( $rs->fetch( $nid ), undef, "correct deleted assigned id" );
-#     is ( $copy->fetch( $nid ), undef, "copy still cant see commit value" );
-
-#     $copy->stow( "neet", $nextid );
-#     $rs->_reset;
-#     is ( $rs->fetch( $nextid ), 'neet', "trans sees copy stow" );
-#     is ( $copy->fetch( $nextid ), 'neet', "copy sees own stow" );
-
-#     $rs->delete_record( $nextid );
-#     is ( $rs->fetch( $nextid ), undef, "trans cant see deleted item" );
-#     is ( $copy->fetch( $nextid ), 'neet', "copy still sees own stow" );
-
-#     $rs->stow( "X" x 10_000 );
-
-#     ok ($rs->commit_transaction(), 'committed the transaction' );
-#     is ($rs->[$rs->TRANSACTION], undef, 'no more transaction' );
-
-#     $copy->_reset;
-#     is ( $copy->fetch( $id ), "THIS MEANS SOMETHING", "correct value in copy after commit" );
-#     is ( $rs->fetch( $id ), "THIS MEANS SOMETHING", "correct value in after commit" );
-
-#     is ( $rs->fetch( $nextid ), undef, "trans cant see deleted item after commit" );
-#     is ( $copy->fetch( $nextid ), undef, "copy sees deleted own stow after commit" );
-
-#     is ( $copy->fetch( $nextid + 1 ), "X" x 10_000, 'big thing saved' );
-
-#     $dir = tempdir( CLEANUP => 1 );
-#     $rs = Yote::RecordStore::File->open_store($dir);
-#     $copy = Yote::RecordStore::File->open_store( $dir );
-    
-#     $rs->use_transaction;
-    
-#     $newid = $rs->stow( "WIBBLES AND FOOKZA" );
-#     $id = $copy->stow( "SOMETHING TO NEARLY DELETE" );
-#     $rs->_reset;
-#     $rs->delete_record( $id );
-
-#     is ( $rs->fetch( $id ), undef, "trans cant see deleted item before commit" );
-#     is ( $copy->fetch( $id ), "SOMETHING TO NEARLY DELETE", "copy sees thing after transaction delete no commit" );
-
-#     $rs->stow( "BLAME ME", $id );
-
-#     is ( $rs->fetch( $id ), "BLAME ME", "trans sees updated before commit" );
-#     is ( $copy->fetch( $id ), "SOMETHING TO NEARLY DELETE", "copy sees thing after transaction delete no commit" );
-
-#     $rs->delete_record( $id );
-
-#     $rs->delete_record( $id );
-
-#     is ( $rs->fetch( $id ), undef, "trans cant see deleted item before commit" );
-#     is ( $copy->fetch( $id ), "SOMETHING TO NEARLY DELETE", "copy sees thing after transaction delete no commit" );
-    
-#     is ( $rs->fetch( $newid ), "WIBBLES AND FOOKZA", "trans can see stowed item before rollback" );
-#     is ( $copy->fetch( $newid ), undef, "copy cant see stowed item before rollback" );
-
-#     $rs->rollback_transaction;
-
-#     is ( $rs->fetch( $id ), "SOMETHING TO NEARLY DELETE", "rs sees thing after transaction delete rollback" );
-#     is ( $copy->fetch( $id ), "SOMETHING TO NEARLY DELETE", "copy sees thing after transaction delete no commit" );
-#     is ( $rs->fetch( $newid ), undef, "trans cant see stowed item after rollback" );
-#     is ( $copy->fetch( $newid ), undef, "copy cant see stowed item after rollback" );
-
-    
-    # need to monkey patch to test rollback of partially commited thing
-    
-    # $dir = tempdir( CLEANUP => 1 );
-    # $rs = Yote::RecordStore::File->open_store($dir);
-    # $copy = Yote::RecordStore::File->open_store( $dir );
-
-    # my $times = 100_000;
-
-    # locks ($copy);
-    # my $id1 = $copy->stow( "THIS IS THE FIRST ONE IN THE FIRST PLACE" );
-    # my $id2 = $copy->stow( "DELETE ME OR TRY TO" );
-    # my $id3 = $copy->stow( "OH, CHANGE THIS REALLY BIG THING"x$times );
-    # my $id4 = $copy->stow( "CHANGE ME UP" );
-    # unlocks ($copy);
-
-    # locks ($rs);
-    # my( $breakid );
-
-    # $rs->use_transaction;
-    
-    # $rs->stow( "GROWING IT UP"x$times, $id1 );
-    # $rs->delete_record( $id2 );
-
-    # $rs->stow( "SHRINKING THIS DOWN", $id3 );
-    # $rs->stow( "CHANGED THIS UP", $id4 );
-    
-    # $breakid = $rs->stow( "BREAK ON THIS" );
-
-    # no warnings 'redefine';
-    # no strict 'refs';
-    # local *Yote::RecordStore::File::Silo::put_record = sub {
-    #     my( $self, $id, $data, $template, $offset ) = @_;
-    #     if( $self->[Yote::RecordStore::File::Silo->CUR_COUNT+1] ) {
-    #         if( $id == $breakid ) {
-    #             $@ = "Breakpoint";
-    #             return undef;
-    #         }
-    #     }
-
-    #     if( $id > $self->entry_count || $id < 1 ) {
-    #         $@ = "Yote::RecordStore::File::Silo->put_record : index $id out of bounds for silo $self->[0]. Store has entry count of ".$self->entry_count;
-    #         return undef;
-    #     }
-    #     if( ! $template ) {
-    #         $template = $self->[Yote::RecordStore::File::Silo->TEMPLATE];
-    #     }
-
-    #     my $rec_size = $self->[Yote::RecordStore::File::Silo->RECORD_SIZE];
-    #     my $to_write = pack ( $template, ref $data ? @$data : $data );
-    #     # allows the put_record to grow the data store by no more than one entry
-    #     my $write_size = do { use bytes; length( $to_write ) };
-    #     if( $write_size > $rec_size) {
-    #         $@ = "Yote::RecordStore::File::Silo->put_record : record size $write_size too large. Max is $rec_size";
-    #         return undef;
-    #     }
-
-    #     my( $idx_in_f, $fh, $subsilo_idx ) = $self->_fh( $id );
-
-    #     $offset //= 0;
-    #     my $seek_pos = $rec_size * $idx_in_f + $offset;
-    #     sysseek( $fh, $seek_pos, SEEK_SET );
-    #     syswrite( $fh, $to_write );
-
-    #     return 1;
-    # };
-    # use strict 'refs';
-
-
-    # $rs->index_silo->[Yote::RecordStore::File::Silo->CUR_COUNT+1] = 1;
-
-    # is ( $rs->fetch( $id1 ), "GROWING IT UP"x$times, "in trans with correct value" );
-    # is ( $rs->fetch( $id2 ), undef, "deleted in trans" );
-    # is ( $rs->fetch( $id3 ), "SHRINKING THIS DOWN", "other changed val in trans");
-    # is ( $rs->fetch( $id4 ), "CHANGED THIS UP", "~ same size thing changed in trans");
-    # is ($rs->commit_transaction, undef,  "cant commit due to monkeypatched error" );
-    # like ($@, qr/Breakpoint/, 'break msg' );
-    # undef $@;
-
-    # # okey, that transaction kinda went away
-    # # so load it up, I guess
-    # is ($rs->[$rs->TRANSACTION_INDEX_SILO]->entry_count, 1, 'one transaction' );
-
-    # my $trans = $rs->[$rs->TRANSACTION];
-    # is ( $trans->{state}, Yote::RecordStore::File::Transaction::TR_IN_COMMIT, "attached transaction is in commit" );
-
-    # $trans = Yote::RecordStore::File::Transaction->open( $rs, 1 );
-
-    # is ( $trans->{state}, Yote::RecordStore::File::Transaction::TR_IN_COMMIT, "transaction is in commit" );
-
-    # is ( $rs->fetch( $id1 ), undef, 'fetch returns undef when in bad state' );
-    # like ($@, qr/Transaction is in a bad state/ );
-    # undef $@;
-
-    # ok ($rs->is_locked, 'rs is locked');
-
-    # unlocks ($rs);
-
-    # ok ( ! $rs->is_locked, 'rs no longer locked');
-
-    # # now we gotta think about what might happen to the copy. maybe talk about locks?
-    # locks ($copy);
-
-    # # test if the state of the recordstore fixes itself with transaction in bad state
-    # is ( $copy->fetch( $id1 ), "THIS IS THE FIRST ONE IN THE FIRST PLACE", "id 1 unchanged" );
-    # is ( $copy->fetch( $id2 ), "DELETE ME OR TRY TO", "id 2 unchanged" );
-    # is ( $copy->fetch( $id3 ), "OH, CHANGE THIS REALLY BIG THING"x$times, "id 3 unchanged" );
-    # is ( $copy->fetch( $id4 ), "CHANGE ME UP", "id 4 unchanged" );
-        
-    # use strict 'refs';
-
-    # $rs->index_silo->[Yote::RecordStore::File::Silo->CUR_COUNT+1] = 1;
-
-    # is ( $rs->fetch( $id1 ), "NEW STOW AND MAYBE IT WILL GO"x$times, "in trans with correct value." );
-    # is ( $rs->fetch( $id2 ), undef, "deleted in trans" );
-    # is ( $rs->fetch( $id3 ), "CHANGING THIS SOME", "other changed val in trans");
-
-    # eval {
-    #     $rs->rollback_transaction;
-    #     fail( "able to rollback without the monkeypatched die" );
-    # };
-    # like ($@, qr/Breakpoint/, 'break msg' );
-    # undef $@;
-    # eval {
-    #     my $res = $rs->fetch( $id1 );
-    #     fail( "Able to get result from bad transaction" );
-    # };
-    # if( $@ ) {
-    #     like ($@, qr/Transaction is in a bad state/, 'bad state errm' );
-    #     undef $@;
-    # }
-    # # test if the state of the recordstore fixes itself with transaction in bad state
-    # is ( $copy->fetch( $id1 ), "THIS IS THE FIRST ONE IN THE FIRST PLACE", "id 1 unchanged" );
-    # is ( $copy->fetch( $id2 ), "DELETE ME OR TRY TO", "id 2 unchanged" );
-    # is ( $copy->fetch( $id3 ), "OH, CHANGE THIS REALLY BIG THING"x$times, "id 3 unchanged" );
-
-    # $dir = tempdir( CLEANUP => 1 );
-    # my $store = Yote::RecordStore::File->open_store( $dir );
-    # $id = $store->stow( "FOO" );
-    # $store->stow( "BAR" );
-    # $id2 = $store->stow( "DELME" );
-    # $store->use_transaction;
-    # $store->delete_record( $id2 );
-    # is ( $store->silos_entry_count, 3, '3 entries in silos with commit with last delete' );
-    # $store->commit_transaction;
-    # is ( $store->silos_entry_count, 2, '2 entries remain in silos after commit w last delete' );
-    # $store->delete_record( $id );
-    # is ( $store->silos_entry_count, 1, 'now just one entry after commit with last delete' );
-
-    # $dir = tempdir( CLEANUP => 1 );
-    # $store = Yote::RecordStore::File->open_store( $dir );
-    # $id = $store->stow( "FOO" );
-    # $store->stow( "BAR" );
-    # $id2 = $store->stow( "DELME" );
-
-    # $store = Yote::RecordStore::File->open_store( $dir );
-    # $store->use_transaction;
-    # $store->delete_record( $id2 );
-    # is ( $store->silos_entry_count, 3, '3 entries in silos with commit with last delete' );
-
-    # no strict 'refs';
-    # no warnings 'redefine';
-
-    # local *Yote::RecordStore::File::_vacate = sub {
-    #     my( $self, $silo_id, $id_to_empty ) = @_;
-    #     if ( $silo_id == 12 && $id_to_empty == $id2 ) {
-    #         $self->_unlock;
-    #         die "VACATE BREAK";
-    #     }
-    #     my $silo = $self->[Yote::RecordStore::File->SILOS][$silo_id];
-    #     my $rc = $silo->entry_count;
-    #     if ( $id_to_empty == $rc ) {
-    #         $silo->pop;
-    #     } else {
-    #         while ( $rc > $id_to_empty ) {
-    #             my( $state, $id ) = (@{$silo->get_record( $rc, 'IL' )});
-    #             if ( $state == Yote::RecordStore::File->RS_ACTIVE ) {
-    #                 $silo->copy_record($rc,$id_to_empty);
-    #                 $self->[Yote::RecordStore::File->INDEX_SILO]->put_record( $id, [$silo_id,$id_to_empty], "IL" );
-    #                 $silo->pop;
-    #                 return;
-    #             } elsif ( $state == Yote::RecordStore::File->RS_DEAD ) {
-    #                 $silo->pop;
-    #             } else {
-    #                 return;
-    #             }
-    #             $rc--;
-    #         }
-    #     }
-    # };
-    # no strict 'refs';
-    # failnice( $store->commit_transaction,
-    #           'VACATE BREAK',
-    #           "was able to commit without breakage" );
-
-    # $store = Yote::RecordStore::File->open_store( $dir );
-    # is ( $store->silos_entry_count, 3, 'still 3 entries in silos after commit' );
-
-    # $store->fetch( $id, 'FOO', 'reopen store still foos' );
-    # is ( $store->silos_entry_count, 3, 'foo doesnt fix the interrupted commit because the interrupted commit was marked complete and just had a few things not purged from the record store ' );
-    # $store->delete_record( $id );
-    # is ( $store->silos_entry_count, 1, 'back down to bar' );
-
     {
         $dir = tempdir( CLEANUP => 1 );
         my $store = Yote::RecordStore::File->open_store( $dir );
 
         locks $store;
-        
+
         $store->stow( "A" );
         $store->stow( "B" );
         $store->stow( "C" );
@@ -1181,12 +976,262 @@ sub test_transactions {
         is_deeply( get_rec(3, $silo), [$rs->RS_DEAD,3,1,'C'], 'rec 3' );
         is_deeply( get_rec(4, $silo), [$rs->RS_ACTIVE,4,1,'D'], 'rec 4' );
         is_deeply( get_rec(5, $silo), [$rs->RS_ACTIVE,5,1,'E'], 'rec 5' );
-        
+
         is ($silo->entry_count, 5, '5 items' );
     }
 
+    # test some transaction fails
+    {
+        $dir = tempdir( CLEANUP => 1 );
+        my $store = Yote::RecordStore::File->open_store( $dir );
+
+        locks ($store);
+
+        my $tsilo = $store->transaction_silo;
+        is ($tsilo->entry_count, 0, 'no entries in trans silo');
+
+        my $silo = $store->silos->[12];
+        is ($silo->entry_count, 0, 'no entries in silo');
+
+        is ($store->stow( "A" ), 1, "first id");
+        is ($store->stow( "B" ), 2, 'id 2' );
+        is ($silo->entry_count, 2, '2 entries in silo');
+
+        $store->use_transaction;
+        is ($tsilo->entry_count, 1, 'one entries in trans silo');
+
+        is ($store->stow( "RA" ), 3, 'id 3' );
+        is ($store->stow( "RB" ), 4, 'id 4' );
+        is ($silo->entry_count, 4, '4 entries in silo');
+        is ($store->fetch(3), 'RA', 'value before commit' );
+        is ($store->fetch(4), 'RB', 'value before commit' );
+
+        # destroy transaction and unlock for test
+        $store->[$store->TRANSACTION] = undef;
+        unlocks ($store);
+
+        #
+        # pretend store is locked to be able to fetch things
+        #
+        $store->[$store->IS_LOCKED] = 1;
+        is ($silo->entry_count, 4, 'still 4 entries in silo');
+
+        is ($store->fetch(1), 'A', 'first fe' );
+        is ($store->fetch(2), 'B', 'sec fe' );
+        is ($store->fetch(3), undef, 'not commited dead val 1' );
+        is ($store->fetch(4), undef, 'not commited dead val 2' );
+
+        #
+        # Try to reset the store now which will fix the transaction
+        #
+        $store->_reset;
+        is ($tsilo->entry_count, 0, 'fixed cleared out trans silo');
+        is ($silo->entry_count, 4, 'still 4 entries since those 2 were not noted or cleaned up');
+    }
+
+    {
+        $dir = tempdir( CLEANUP => 1 );
+
+        my $rs = Yote::RecordStore::File->open_store( $dir );
+
+        my $silo = $rs->silos->[12];
+        is ($silo->entry_count, 0, 'silo starts off empty' );
+
+        locks ($rs);
+
+        my $id = $rs->stow( "ZERO" );
+
+        is ($silo->entry_count, 1, 'silo now has one' );
+
+        ok ($rs->use_transaction);
+
+        $rs->stow( "ONE" );
+        $rs->stow( "TWO" );
+        $rs->stow( "THREE" );
+
+        my $trans = $rs->[$rs->TRANSACTION];
+        $rs->[$rs->TRANSACTION] = undef;
+
+        $id = $rs->stow( "GOING" );
+
+        is ($silo->entry_count, 5, 'silo with 5 items' );
+
+        is_deeply( get_rec(1, $silo), [$rs->RS_ACTIVE,1,4,'ZERO'], 'rec 1' );
+        is_deeply( get_rec(2, $silo), [$rs->RS_IN_TRANSACTION,2,3,'ONE'], 'rec 2' );
+        is_deeply( get_rec(3, $silo), [$rs->RS_IN_TRANSACTION,3,3,'TWO'], 'rec 3' );
+        is_deeply( get_rec(4, $silo), [$rs->RS_IN_TRANSACTION,4,5,'THREE'], 'rec 4' );
+        is_deeply( get_rec(5, $silo), [$rs->RS_ACTIVE,5,5,'GOING'], 'rec 5' );
+
+        # simulate transaction saved but not carried out
+        ok ($trans->_save, 'trans could save');
+        is ($silo->entry_count, 6, 'silo with 6 items after trans save' );
+
+        # now try to clean up things
+
+        $rs->_fix_transactions;
+
+    }
+
+    # test commit transaction fail
+    {
+        $dir = tempdir( CLEANUP => 1 );
+        my $store = Yote::RecordStore::File->open_store( $dir );
+
+        locks ($store);
+
+        my $tsilo = $store->transaction_silo;
+        is ($tsilo->entry_count, 0, 'no entries in trans silo');
+
+        my $silo = $store->silos->[12];
+        is ($silo->entry_count, 0, 'no entries in silo');
+
+        is ($store->stow( "A" ), 1, "first id");
+        is ($store->stow( "B" ), 2, 'id 2' );
+        is ($silo->entry_count, 2, '2 entries in silo');
+
+        $store->use_transaction;
+        is ($tsilo->entry_count, 1, 'one entries in trans silo');
+
+        is ($store->stow( "RA" ), 3, 'id 3' );
+        is ($store->stow( "RB" ), 4, 'id 4' );
+
+        # cause commit to fail. muhahah
+        no warnings 'redefine';
+        no strict 'refs';
+
+        my $t = 0;
+
+        {
+            local *Yote::RecordStore::File::Silo::put_record = sub {
+                if ($t++ > 1) {
+                    $@ = 'monkey';
+                    return undef;
+                }
+                my $self = shift;
+                $self->_put_record( @_ );
+            };
+
+            is ($store->commit_transaction, undef, 'broken commit' );
+
+            is ($store->rollback_transaction, undef, 'broken rollback' );
+        }
+    }
+
+    {
+        $dir = tempdir( CLEANUP => 1 );
+        my $store = Yote::RecordStore::File->open_store( $dir );
+        my $silo = $store->silos->[12];
+        my $isilo = $store->index_silo;
+
+        locks ($store);
+        is ($store->stow( "WOOF" ), 1, 'first woof' );
+        is ($silo->entry_count, 1, 'one entries in transhy');
+        is_deeply( get_rec(1, $silo), [$rs->RS_ACTIVE,1,4,'WOOF'], 'rec in store' );
+        $store->delete_record( 1 );
+
+        is ($isilo->entry_count, 1, 'one index entry');
+
+        my $trans = $store->use_transaction;
+
+        ok( $trans );
+        is ($store->delete_record( 1 ), undef, 'could not delete entry that did not exist' );
+        is ($store->stow( "BBB" ), 2, 'second id, but only for trans' );
+
+        is_deeply( get_rec(1, $silo), [$rs->RS_DEAD,1,4,'WOOF'], 'deleted rec 1 before commit' );
+
+        is ($isilo->entry_count, 2, 'two index entry');
+
+        ok ($store->commit_transaction);
+
+        is_deeply( get_rec(1, $silo), [$rs->RS_DEAD,1,4,'WOOF'], 'rec 2 after commit is first in silo' );
+
+        is ($isilo->entry_count, 3, 'three index entry after commit');
+print STDERR Data::Dumper->Dump(["BREAKS HERe"]);
+        $trans->fix;
+print STDERR Data::Dumper->Dump(["A"]);
+    }
+
+    # put_record doesnt work for
+    #    delete case
+    #    add case
+    # use for record
+    {
+        $dir = tempdir( CLEANUP => 1 );
+        my $store = Yote::RecordStore::File->open_store( $dir );
+        my $silo = $store->silos->[12];
+        my $tsilo = $store->transaction_silo;
+        my $isilo = $store->index_silo;
+print STDERR Data::Dumper->Dump(["A"]);
+        locks ($store);
+print STDERR Data::Dumper->Dump(["B"]);
+        my $failid = [];
+        {
+            no warnings 'redefine';
+            no strict 'refs';
+            local *Yote::RecordStore::File::Silo::put_record = sub {
+                my $self = shift;
+                my( $id, $data, $template, $offset ) = @_;
+                if (compare_arrays( $data, $failid)) {
+                    die 'monkey';
+                }
+                $self->_put_record( @_ );
+            };
+            locks ( $store );
+
+            is ($isilo->entry_count, 0, 'no rec in index silo' );
+
+            $store->use_transaction;
+
+            $failid = [12,1];
+
+            $store->stow( "AOOU" );
+
+            is ($isilo->entry_count, 1, '1 rec in index silo' );
+
+            is_deeply( get_rec( 1, $isilo, 2), [ 0, 0 ], 'index rec is empty because no commit yet' );
+            is ($silo->entry_count, 1, 'the stowed transaction data' );
+
+            is_deeply( get_rec( 1, $silo), [ $store->RS_IN_TRANSACTION, 1, 4, 'AOOU' ], 'stowed transaction data' );
+
+            is ($store->commit_transaction, undef, 'could not commit due to monkey' );
+
+            is ($isilo->entry_count, 2, '2 rec in index silo now, dead record and transaction' );
+
+            is_deeply( get_rec( 1, $isilo, 2), [ 0, 0 ], 'index rec is unchanged' );
+            is_deeply( get_rec( 2, $isilo, 2), [ 12, 2 ], 'index rec is unchanged' );
+
+            is ($tsilo->entry_count, 1, 'one transaction');
+            is_deeply( get_rec( 1, $tsilo), [ $store->TR_IN_COMMIT, 2 ], 'state of transaction silo' );
+
+            $store->_fix_transactions;
+            is ($isilo->entry_count, 2, 'has stow and transaction object' );
+            is ($tsilo->entry_count, 0, 'no transactions');
+            is ($silo->entry_count, 2, 'still 2 entries');
+
+            is_deeply( get_rec( 1, $silo), [ $store->RS_DEAD, 1, 4, 'AOOU' ], 'index rec is unchanged' );
+            my $x = get_rec( 2, $silo);
+            is_deeply( get_rec( 2, $silo, 3), [ $store->RS_DEAD, 2, 24 ], 'transaction object not yet cleared out' );
+            is_deeply( [unpack( "IIIIII", $x->[3])], [$store->RS_ACTIVE,1,0,0,12,1], 'transaction object values' );
+            is_deeply( get_rec( 2, $silo), [ $store->RS_DEAD, 2, 24, pack ("IIIIII", $store->RS_ACTIVE,1,0,0,12,1 ) ], 'transaction object not yet cleared out' );
+
+            $store->_vacuum;
+            is ($silo->entry_count, 0, '2 entries cleaned up');
+        }
+
+    }
+
+    # test fix for transaction that is actually complete
+
 } #test_transactions
 
+sub compare_arrays {
+    my ($a1, $a2) = @_;
+    return if @$a1 != @$a2;
+    for (my $i=0; $i<@$a1; $i++ ) {
+        return if $a1->[$i] ne $a2->[$i]
+    }
+    return 1;
+}
 
 sub test_sillystrings {
 
@@ -1206,13 +1251,13 @@ sub test_meta {
 
     locks $store;
 
-    failnice ($store->fetch_meta( 3 ),
+    failnice (sub{$store->fetch_meta( 3 )},
               'past end of records',
               'no meta to fetch' );
     {
         no warnings 'redefine';
         no strict 'refs';
-        
+
         my $t = 0;
 
         local *Yote::RecordStore::File::_time = sub {

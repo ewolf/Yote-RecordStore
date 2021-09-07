@@ -107,15 +107,15 @@ use constant {
     RS_IN_TRANSACTION => 3,
 
     # transactions
-    TR_ACTIVE         => 1,
-    TR_IN_COMMIT      => 2,
-    TR_IN_ROLLBACK    => 3,
-    TR_COMPLETE       => 4,
+    TR_ACTIVE         => 4,
+    TR_IN_COMMIT      => 5,
+    TR_IN_ROLLBACK    => 6,
+    TR_COMPLETE       => 7,
 };
 
 sub _err {
     my ($method,$txt) = @_;
-    $@ = __PACKAGE__."::$method $txt";
+    die __PACKAGE__."::$method $txt";
 }
 
 sub _warn {
@@ -134,9 +134,8 @@ sub open_store {
 
     unless( -d $dir ) {
         _make_path( $dir, \my $err, 'base' );
-        if ($err && @$err) {
+        if (@$err) {
             _err( 'open_store', "unable to make base directory.". join( ", ", map { $_->{$dir} } @$err ) );
-            return undef;
         }
     }
 
@@ -156,11 +155,11 @@ sub open_store {
     
     $lock_fh = _open($lockfile);
     unless ($lock_fh) {
-        $@ = "Error opening lockfile '$lockfile' : $@ $!";
-        return undef;
+        die "Error opening lockfile '$lockfile' : $@ $!";
     }
 
     _flock( $lock_fh, LOCK_EX );
+
     $lock_fh->autoflush(1);
     print $lock_fh "LOCK\n";
         
@@ -172,7 +171,7 @@ sub open_store {
         if ($existing_vers < 6.06) {
             $@ = "Cannot open recordstore at $dir with version $existing_vers";
             close $vers_fh;
-            return undef;
+            die $@;
         }
         close $vers_fh;
     }
@@ -183,9 +182,8 @@ sub open_store {
     }
 
     _make_path( $silo_dir, \my $err, 'silo' );
-    if ($err && @$err) {
+    if (@$err) {
         _err( 'open_store', "unable to make silo directory.". join( ", ", map { $_->{$silo_dir} } @$err ) );
-        return undef;
     }
 
     my $index_silo = $cls->_open_silo( "$dir/index_silo",
@@ -227,6 +225,7 @@ sub open_store {
     ], $cls;
 
     $store->_fix_transactions;
+    $store->_vacuum;
 
     _flock( $lock_fh, LOCK_UN );
 
@@ -279,20 +278,19 @@ sub lock {
     my $self = shift;
 
     if ($self->[IS_LOCKED]) {
-        warn "Locking already locked";
-        return 1;
+        _warn ( 'lock', "Locking already locked" );
     }
 
     unless (_openhandle( $self->[LOCK_FH] )) {
         my $lockfile = "$self->[DIRECTORY]/LOCK";
         $self->[LOCK_FH] = _open($lockfile);
         unless ($self->[LOCK_FH]) {
-            return undef;
+            die "$@ $!";
         }
     }
 
     unless (_flock( $self->[LOCK_FH], LOCK_EX )) {
-        return undef;
+        die "$@ $!";
     }
 
     $self->[IS_LOCKED] = 1;
@@ -306,13 +304,12 @@ sub unlock {
     my $self = shift;
 
     unless ($self->[IS_LOCKED]) {
-        _err( 'unlock', "store not locked" );
-        return undef;
+        _warn( 'unlock', "store not locked" );
+        return 1;
     }
 
     if ($self->[TRANSACTION]) {
         _err( 'unlock', "may not unlock with a pending transaction, either commit it or roll it back" );
-        return undef;
     }
 
     $self->[IS_LOCKED] = 0;
@@ -325,7 +322,6 @@ sub fetch {
 
     unless ($self->[IS_LOCKED]) {
         _err( 'fetch', "record store not locked");
-        return undef;
     }
 
     my $trans = $self->[TRANSACTION];
@@ -340,7 +336,7 @@ sub _fetch {
     my( $self, $id ) = @_;
 
     if( $id > $self->record_count ) {
-        $@ = "fetch past end of records";
+        warn "fetch past end of records";
         return undef;
     }
     my( $silo_id, $id_in_silo, $update_time, $creation_time ) = @{$self->[INDEX_SILO]->get_record($id)};
@@ -356,11 +352,10 @@ sub fetch_meta {
 
     unless ($self->[IS_LOCKED]) {
         _err( 'fetch_meta', "record store not locked");
-        return undef;
     }
 
     if( $id > $self->record_count ) {
-        $@ = "fetch past end of records";        
+        _warn( 'fetch_meta', "fetch past end of records" );
         return undef;
     }
 
@@ -373,7 +368,6 @@ sub stow {
 
     unless ($self->[IS_LOCKED]) {
         _err( 'stow', "record store not locked");
-        return undef;
     }
 
     my $trans = $self->[TRANSACTION];
@@ -385,13 +379,12 @@ sub stow {
 }
 
 sub _stow {
-    my ($self, $data, $id ) = @_;
+    my ($self, $data, $id, $rs_override ) = @_;
 
     my $index = $self->[INDEX_SILO];
 
     if( defined $id && ($id < 1|| int($id) != $id)) {
         _err( 'stow', "id when supplied must be a positive integer" );
-        return undef;
     }
 
     $index->ensure_entry_count( $id );
@@ -408,7 +401,7 @@ sub _stow {
     my $new_silo_id = $self->_silo_id_for_size( $data_write_size );
     my $new_silo = $self->[SILOS][$new_silo_id];
 
-    my $new_id_in_silo = $new_silo->push( [RS_ACTIVE, $id, $data_write_size, $data] );
+    my $new_id_in_silo = $new_silo->push( [$rs_override || RS_ACTIVE, $id, $data_write_size, $data] );
 
     my $t = _time();
 
@@ -417,17 +410,21 @@ sub _stow {
     }
 
     if( $old_silo_id ) {
-        $self->_vacate( $old_silo_id, $old_id_in_silo );
+        $self->_mark( $old_silo_id, $old_id_in_silo, RS_DEAD );
     }
 
     return $id;
 } #stow
 
+sub _mark {
+    my ($self, $silo_id, $id_in_silo, $rs ) = @_;
+    $self->[SILOS][$silo_id]->put_record( $id_in_silo, [ $rs ], 'I' );
+}
+
 sub next_id {
     my $self = shift;
     unless ($self->[IS_LOCKED]) {
         _err( 'next_id', "record store not locked");
-        return undef;
     }
 
     return $self->[INDEX_SILO]->next_id;
@@ -442,26 +439,23 @@ sub delete_record {
 
     unless ($self->[IS_LOCKED]) {
         _err( 'delete_record', "record store not locked");
-        return undef;
     }
 
     my $trans = $self->[TRANSACTION];
+
     if( $trans ) {
         return $trans->delete_record( $del_id );
     }
 
     if( $del_id > $self->[INDEX_SILO]->entry_count ) {
         _err( 'delete_record', "Tried to delete past end of records" );
-        return undef;
     }
     my( $old_silo_id, $old_id_in_silo ) = @{$self->[INDEX_SILO]->get_record($del_id)};
     my $t = _time();
-    unless ($self->[INDEX_SILO]->put_record( $del_id, [0,0,$t,$t] )) {
-        return undef;
-    }
+    $self->[INDEX_SILO]->put_record( $del_id, [0,0,$t,$t] );
 
     if( $old_silo_id ) {
-        $self->_vacate( $old_silo_id, $old_id_in_silo );
+        $self->_mark( $old_silo_id, $old_id_in_silo, RS_DEAD );
     }
 } #delete_record
 
@@ -471,11 +465,10 @@ sub use_transaction {
 
     unless ($self->[IS_LOCKED]) {
         _err( 'use_transaction', "record store not locked");
-        return undef;
     }
 
     if( $self->[TRANSACTION] ) {
-        warn __PACKAGE__."->use_transaction : already in transaction";
+        _warn ('use_transaction', 'already in transaction');
         return $self->[TRANSACTION];
     }
     $self->[TRANSACTION] = Yote::RecordStore::File::Transaction->create( $self );
@@ -488,14 +481,12 @@ sub commit_transaction {
 
     unless ($self->[IS_LOCKED]) {
         _err( 'commit_transaction', "record store not locked");
-        return undef;
     }
 
     my $trans = $self->[TRANSACTION];
 
     unless( $trans ) {
         _err( 'commit_transaction',  'no transaction to commit' );
-        return undef;
     }
 
     if ($trans->commit) {
@@ -510,14 +501,12 @@ sub rollback_transaction {
 
     unless ($self->[IS_LOCKED]) {
         _err( 'rollback_transaction', "record store not locked");
-        return undef;
     }
 
 
     my $trans = $self->[TRANSACTION];
     unless( $trans ) {
         _err( 'rollback_transaction',  'no transaction to roll back' );
-        return undef;
     }
     if ($trans->rollback) {
         $self->[TRANSACTION] = undef;
@@ -542,7 +531,6 @@ sub silos_entry_count {
 
     unless ($self->[IS_LOCKED]) {
         _err( 'silos_entry_count', "record store not locked");
-        return undef;
     }
 
     my $silos = $self->silos;
@@ -558,7 +546,6 @@ sub record_count {
 
     unless ($self->[IS_LOCKED]) {
         _err( 'record_count', "record store not locked");
-        return undef;
     }
 
     return $self->[INDEX_SILO]->entry_count;
@@ -569,7 +556,6 @@ sub active_entry_count {
 
     unless ($self->[IS_LOCKED]) {
         _err( 'active_entry_count', "record store not locked");
-        return undef;
     }
 
     my $index = $self->index_silo;
@@ -598,6 +584,29 @@ sub _time {
     int(time * 1000);
 }
 
+sub _vacuum {
+    my $self = shift;
+
+    # scan each silo for stuff to vacuum
+    my $silos = $self->[SILOS];
+    for my $silo_id (0..$#$silos) {
+        my $silo = $silos->[$silo_id];
+        next unless $silo;
+
+        my $start_id = 1;
+        while ($start_id <= $silo->entry_count) {
+            my( $rec_state ) = (@{$silo->get_record( $start_id, 'I' )});
+            if ($rec_state != RS_ACTIVE) {
+                # potentially swap out to end
+                $self->_vacate( $silo_id, $start_id );
+            } else {
+                $start_id++;
+            }
+        }
+    }
+    
+} #_vacuum
+
 sub _vacate {
     my( $self, $silo_id, $id_to_empty ) = @_;
 
@@ -614,6 +623,7 @@ sub _vacate {
     my $rc = $silo->entry_count;
 
     if( $id_to_empty == $rc ) {
+        # if the one being vacated is the last one
         $silo->pop;
     } 
     else {
@@ -623,27 +633,19 @@ sub _vacate {
                 # is active, so copy its data to the vacated position
                 # and update the index
                 unless ($silo->copy_record($rc,$id_to_empty)) {
-                    _warn ('_vacate', "unable to copy record $@ $!" );
                     _err ('_vacate', "unable to copy record $@ $!" );
-                    return undef;
                 }
                 # the following does not update the time field, it preserves it
                 $self->[INDEX_SILO]->put_record( $id, [$silo_id,$id_to_empty], "IL" );
                 $silo->pop;
                 return 1;
             }
-            elsif( $rec_state == RS_DEAD ) {
-                # is dead, pop it off and look for the next one
-                $silo->pop;
-            }
-            else {
-                _warn ('_vacate', "got record state $rec_state. not popping" );
-                _err ('_vacate', "got record state $rec_state. not popping" );
-                return undef;
-            }
+            # not an active record so pop it off and try again
+            $silo->pop;
             $rc--;
         }
     }
+
     return 1;
 } #_vacate
 
@@ -845,22 +847,3 @@ the given directory, if any.
 
 =cut
 
-
-# ------------- for DEBUG ---------
-
-sub _show_silo {
-    my( $self, $txt, $temp ) = @_;
-
-    my( @pairs ) = (['index',$self->[INDEX_SILO],"IL"], map { ["record $_", $self->[SILOS][$_],'IL'] } ($self->[MIN_SILO_ID]..$self->[MAX_SILO_ID]) );
-    my $trans = $self->[TRANSACTION];
-    if( $trans ) {
-        push @pairs, ['trans stack',$trans->{stack_silo}];
-    }
-    print STDERR "\n";
-    for my $pair (@pairs) {
-        my( $title, $silo, $templ ) = @$pair;
-        if( my $ec = $silo->entry_count ) {
-            print STDERR " $title : $txt ". join(",", map { " ($_)[".join(",",@{$silo->get_record($_,$templ)} ).']' } (1..$ec) )."\n";
-        }
-    }
-}
