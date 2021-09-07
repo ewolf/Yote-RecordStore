@@ -28,36 +28,31 @@ use constant {
     CUR_COUNT           => 7,
 };
 
-sub _err {
+sub _die {
     my ($method,$txt) = @_;
-    $@ = __PACKAGE__."::$method $txt";
+    die __PACKAGE__."::$method $txt";
 }
 
 sub open_silo {
     my( $class, $dir, $template, $size, $max_file_size ) = @_;
 
     if( ! $dir ) {
-        _err( 'open_silo', "must supply directory to open silo" );
-        return undef;
+        _die( 'open_silo', "must supply directory to open silo" );
     }
     if( ! $template ) {
-        _err( 'open_silo', "must supply template to open silo" );
-        return undef;
+        _die( 'open_silo', "must supply template to open silo" );
     }
     my $record_size = $template =~ /\*/ ? $size : do { use bytes; length( pack( $template ) ) };
     if( $record_size < 1 ) {
-        _err( 'open_silo', "no record size given to open silo");
-        return undef;
+        _die( 'open_silo', "no record size given to open silo");
     }
     if( $size && $size != $record_size ) {
-        _err( 'open_silo', "Silo given size and template size do not match" );
-        return undef;
+        _die( 'open_silo', "Silo given size and template size do not match" );
     }
 
     _make_path( $dir, \my $err );
     if( @$err ) {
-        _err( '_make_path', "unable to make $dir directory.". join( ", ", map { $_->{$dir} } @$err ));
-        return undef;
+        _die( '_make_path', "unable to make $dir directory.". join( ", ", map { $_->{$dir} } @$err ));
     }
 
     if( $max_file_size < 1 ) {
@@ -68,8 +63,7 @@ sub open_silo {
         # must have at least an empty silo file
         my $out = _open( '>', "$dir/0" );
         unless ($out) {
-            _err( "open_silo", "unable to create silo data file $dir/0 : $@ $!" );
-            return undef;
+            _die( "open_silo", "unable to create silo data file $dir/0 : $@ $!" );
         }
         print $out '';
         close $out;
@@ -130,13 +124,11 @@ sub get_record {
         $template = $self->[TEMPLATE];
     }
     if( $id > $self->entry_count || $id < 1 ) {
-        _err( 'get_record', "index $id out of bounds for silo $self->[DIRECTORY]. Silo has entry count of ".$self->entry_count );
-        return undef;
+        _die( 'get_record', "index $id out of bounds for silo $self->[DIRECTORY]. Silo has entry count of ".$self->entry_count );
     }
     my( $idx_in_f, $fh, $subsilo_idx ) = $self->_fh( $id );
     unless ($fh) {
-        _err( 'get_record', "Unable to open subsilo $id : $! $@" );
-        return undef;
+        _die( 'get_record', "Unable to open subsilo $id : $! $@" );
     }
 
     $offset //= 0;
@@ -149,11 +141,14 @@ sub get_record {
 } #get_record
 
 sub put_record {
-    my( $self, $id, $data, $template, $offset ) = @_;
+    my $self = shift;
+    $self->_put_record( @_ );
+}
 
+sub _put_record {
+    my( $self, $id, $data, $template, $offset ) = @_;
     if( $id > $self->entry_count || $id < 1 ) {
-        _err( 'put_record', "index $id out of bounds for silo $self->[DIRECTORY]. Silo has entry count of ".$self->entry_count );
-        return undef;
+        _die( 'put_record', "index $id out of bounds for silo $self->[DIRECTORY]. Silo has entry count of ".$self->entry_count );
     }
     if( ! $template ) {
         $template = $self->[TEMPLATE];
@@ -166,8 +161,7 @@ sub put_record {
     my $write_size = do { use bytes; length( $to_write ) };
 
     if( $write_size > $rec_size) {
-        _err( 'put_record', "record size $write_size too large. Max is $rec_size" );
-        return undef;
+        _die( 'put_record', "record size $write_size too large. Max is $rec_size" );
     }
 
     my( $idx_in_f, $fh, $subsilo_idx ) = $self->_fh( $id );
@@ -182,7 +176,12 @@ sub put_record {
 } #put_record
 
 sub pop {
+    shift->_pop;
+} #pop
+
+sub _pop {
     my( $self ) = @_;
+    
     my $entries = $self->entry_count;
     unless( $entries ) {
         return undef;
@@ -201,7 +200,7 @@ sub pop {
     undef $self->[CUR_COUNT];
 
     return $ret;
-} #pop
+}
 
 sub peek {
     my( $self ) = @_;
@@ -265,8 +264,7 @@ sub empty_silo {
         if( $file eq '0' ) {
             my $fh = _open( '+<', "$dir/0" );
             unless ($fh) {
-                _err( "unable to reset silo file $dir/0: $@ $!" );
-                return undef;
+                _die( "unable to reset silo file $dir/0: $@ $!" );
             }
             truncate $fh, 0;
         } else {
@@ -315,8 +313,7 @@ sub ensure_entry_count {
 #            my $fh = cacheout "+<", 
             my $fh = _open( '+<', "$dir/$write_file" );
             unless ($fh) {
-                _err( 'ensure_entry_count', "unable to open $dir/$write_file : $@ $!" );
-                return undef;
+                _die( 'ensure_entry_count', "unable to open $dir/$write_file : $@ $!" );
             }
            # $fh->autoflush(1);
             $nulls = "\0" x ( $records_needed_to_fill * $rec_size );
@@ -332,13 +329,11 @@ sub ensure_entry_count {
             $write_file++;
 
             if( -e "$dir/$write_file" ) {
-                _err( 'ensure_entry_count', "file $dir/$write_file already exists" );
-                return undef;
+                _die( 'ensure_entry_count', "file $dir/$write_file already exists" );
             }
             my $fh = _open( ">", "$dir/$write_file" );
             unless ($fh) {
-                _err( 'ensure_entry_count', "could not open file '$dir/$write_file' : $! $@" );
-                return undef;
+                _die( 'ensure_entry_count', "could not open file '$dir/$write_file' : $! $@" );
             }
 #            $fh->autoflush(1);
             print $fh '';
@@ -355,8 +350,7 @@ sub ensure_entry_count {
             $write_file++;
 
             if( -e "$dir/$write_file" ) {
-                _err( 'ensure_entry_count', "file $dir/$write_file already exists" );
-                return undef;
+                _die( 'ensure_entry_count', "file $dir/$write_file already exists" );
             }
             my $fh = _open( ">", "$dir/$write_file" );
             
@@ -382,8 +376,7 @@ sub subsilos {
     my $dh = $self->_opensilosdir;
 
     unless ($dh) {
-        _err( 'subsilos', "unable to open subsilo directory $dir: $! $@" );
-        return undef;
+        _die( 'subsilos', "unable to open subsilo directory $dir: $! $@" );
     }
 
     my( @files ) = (sort { $a <=> $b } grep { $_ eq '0' || (-s "$dir/$_") > 0 } grep { $_ > 0 || $_ eq '0' } readdir( $dh ) );
@@ -409,8 +402,7 @@ sub _fh {
 
     my $fh = _open ("+<", "$dir/$subsilo_idx");
     unless( $fh ) {
-        _err( '_fh', "$dir/$subsilo_idx : $!" );
-        return undef;
+        _die( '_fh', "$dir/$subsilo_idx : $!" );
     }
     return $idx_in_f, $fh, $subsilo_idx;
 

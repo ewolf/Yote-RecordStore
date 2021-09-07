@@ -30,7 +30,9 @@ exit( 0 );
 
 sub failnice {
     my( $subr, $errm, $msg ) = @_;
-    is ($subr->(), undef, $msg );
+    eval {
+        $subr->();
+    };
     like( $@, qr/$errm/, "$msg error" );
     undef $@;
 }
@@ -109,10 +111,9 @@ sub test_use {
     $silo->ensure_entry_count( 1 );
     is( $silo->size, $size, 'silo now with one record. correct size' );
     is( $silo->entry_count, 1, 'silo now with one record. correct count' );
-    is ($silo->get_record(0), undef, 'record zero');
-    like ($@, qr/index 0 out of bounds/, 'record zero error message' );
-    is ($silo->get_record(2), undef, 'record out of bounds');
-    like ($@, qr/index 2 out of bounds/, 'record out of bounds error message' );
+    failnice  ( sub { $silo->get_record(0) }, 'index 0 out of bounds', 'no record zero');
+    failnice  ( sub { $silo->get_record(2) }, 'index 2 out of bounds', 'no record 2');
+
     is_deeply( $silo->get_record( 1 ), [''], 'empty record' );
     is_deeply( $silo->peek, [''], "empty peek" );
 
@@ -174,18 +175,13 @@ sub test_use {
     is( $silo->entry_count, 40, 'silo still 40. correct count after pop' );
     is_deeply( [$silo->subsilos], [0,1,2,3], 'four subsilos still 40 entries after pop' );
 
-    is ( $silo->put_record( 41, "WRONG" ), undef, 'record beyond end of bounds' );
-    like( $@, qr/out of bounds/, 'error message for put past entries' );
+    failnice ( sub { $silo->put_record( 41, "WRONG" ) }, 'out of bounds', 'record beyond end of bounds' );
     
-    is ($silo->put_record( 0, "WRONG" ), undef, 'put record with index of 0' );
-
-    like( $@, qr/out of bounds/, 'error message for zero index' );
+    failnice (sub {$silo->put_record( 0, "WRONG" )}, 'out of bounds', 'put record with index of 0' );
     
-    is ($silo->put_record( -1, "WRONG" ), undef, 'put record with index < 0' );
-    like( $@, qr/index -1 out of bounds/, 'error message for wrong index' );
+    failnice (sub {$silo->put_record( -1, "WRONG" )}, 'index -1 out of bounds', 'put record with index < 0' );
 
-    is ($silo->put_record( 5, "WRONG".('x'x$size) ), undef, 'put record too big' );
-    like( $@, qr/too large/, 'error message for too big data' );
+    failnice (sub {$silo->put_record( 5, "WRONG".('x'x$size) )}, 'too large', 'put record too big' );
 
     {
 
@@ -343,27 +339,19 @@ sub test_use {
     $id = $silo->push( "SOMETHING EXCELLENT" );
     is ($id, 1, 'firsty id');
     is_deeply( $silo->get_record(1), ['SOMETHING EXCELLENT'], 'first value' );
-    is ($silo->copy_record( 1, 0 ), undef, 'copy to zero dest' );
-    like ($@, qr/out of bounds/, 'copy to zero dest error message' );
-    undef $@;
+    failnice (sub{$silo->copy_record( 1, 0 )}, 'out of bounds', 'copy to zero dest' );
 
     is_deeply( $silo->get_record(1), ['SOMETHING EXCELLENT'], 'first value 1' );
               
-    is ( $silo->copy_record( 0, 1 ), undef, 'copy from zero source' );
-    like ($@, qr/out of bounds/, 'copy from zero source message' );
-    undef $@;
+    failnice ( sub{$silo->copy_record( 0, 1 )}, 'out of bounds', 'copy from zero source' );
 
     is_deeply( $silo->get_record(1), ['SOMETHING EXCELLENT'], 'first value 2' );
 
-    is ( $silo->copy_record( 3, 1 ), undef, 'copy from too big source' );
-    like ($@, qr/out of bounds/, 'copy from too big source message' );
-    undef $@;
+    failnice ( sub{$silo->copy_record( 3, 1 )}, 'out of bounds', 'copy from too big source' );
               
     is_deeply( $silo->get_record(1), ['SOMETHING EXCELLENT'], 'first value 3' );
 
-    is( $silo->copy_record( 1, 3 ), undef, 'copy to too big dest' );
-    like ($@, qr/out of bounds/, 'copy to too big dest message' );
-    undef $@;
+    failnice ( sub{$silo->copy_record( 1, 3 )}, 'out of bounds', 'copy to too big dest' );
 
     is_deeply( $silo->get_record(1), ['SOMETHING EXCELLENT'], 'first value 4' );
               
@@ -378,8 +366,7 @@ sub test_use {
 
     $size = 2 ** 10;
     $silo = Yote::RecordStore::File::Silo->open_silo( $dir, 'Z*', $size, $size * 10, );
-    is ($silo->push( "WRONG".('x'x$size) ), undef, 'push record too big' );
-    like( $@, qr/too large/, 'error message for too big data push' );
+    failnice (sub {$silo->push( "WRONG".('x'x$size) )}, 'too large', 'push record too big' );
 
     {
         my $dir2 = tempdir( CLEANUP => 1 );
@@ -411,7 +398,7 @@ sub test_use {
                   'file wont open so open_silo fails' );
 
         failnice( sub { $silo2->get_record(1); },
-                  'Unable to open subsilo',
+                  'No such file or directory',
                   'get record not able to open file' );
 
         $trip = 0;
