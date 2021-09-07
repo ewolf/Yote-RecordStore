@@ -96,7 +96,7 @@ sub get_rec {
 sub test_misc {
     my $dir = tempdir( CLEANUP => 1 );
     chmod 0444, $dir;
-    is (Yote::RecordStore::_open( "$dir/foo" ), undef,
+    is (Yote::RecordStore::_open( "$dir/foo", '>>' ), undef,
         'open write only file' );
     chmod 0666, $dir;
 }
@@ -145,7 +145,7 @@ sub test_vacate {
     #$rs->_vacate( 12, 2 );
     is ($trans->rollback, 1, 'rolled back' );
 
-    $silo->reset;
+    $silo->sync_to_filesystem;
 
     is ($rs->transaction_silo->entry_count, 0, 'no entries in trans silo post rollback' );
 
@@ -796,7 +796,9 @@ sub test_use {
     is ( $rs->active_entry_count, 3, "3 active items in silos after delete" );
 
     ok ($rs->lock, "got lock");
+use Scalar::Util qw(openhandle);
     is (flock( $rs->[Yote::RecordStore->LOCK_FH], LOCK_NB || LOCK_EX ), 0, 'unable to lock already locked fh' );
+
     ok ($rs->unlock, "unlock");
 
     {
@@ -866,9 +868,9 @@ sub test_use {
         ok ($rs->unlock, "unlock filehandle");
         local *Yote::RecordStore::_open = sub {
             $@ = 'monkeypatch _open ';
-            return undef;
+            return 0;
         };
-        failnice (sub{$rs->lock}, 'monkeypatch _open', "lock fail with open fail");
+        failnice (sub(){$rs->lock}, 'monkeypatch _open', "lock fail with open fail");
     }
     {
         ok (-e "$dir/LOCK", "lock file exists");
@@ -897,7 +899,7 @@ sub test_use {
 
         $dir = tempdir( CLEANUP => 1 );
         failnice(sub{Yote::RecordStore->open_store($dir)},
-                 'unable to lock',
+                 'cannot open, unable to open lock',
                  'bad flock cant open' );
         $fail = -1;
         failnice(sub{Yote::RecordStore->open_store($dir)},
@@ -935,7 +937,7 @@ sub test_use {
         };
         $dir = tempdir( CLEANUP => 1 );
         failnice( sub{Yote::RecordStore->open_store("$dir/deeper")},
-                  'Error opening lockfile.*monkeypatch',
+                  'cannot open, unable to open.*monkeypatch',
                   'make record store fail on lock' );
     }
     {
@@ -1040,7 +1042,7 @@ sub test_transactions {
 
     # see that there is one transaction that needs fixing
     my $trans_silo = $copy->transaction_silo;
-    $trans_silo->reset;
+    $trans_silo->sync_to_filesystem;
     my $last_trans = $trans_silo->entry_count;
     is ($last_trans, 1, 'one transaction outstanding' );
 
@@ -1049,7 +1051,7 @@ sub test_transactions {
     unlocks ($copy);
 
     # reet the trans silo to confirm it empty
-    $trans_silo->reset;
+    $trans_silo->sync_to_filesystem;
     $last_trans = $trans_silo->entry_count;
     is ($last_trans, 0, 'no transactions outstanding' );
 
@@ -1410,11 +1412,11 @@ sub test_transactions {
         $store->delete_record( 1 );
         $store->delete_record( 1 );
 
-        $silo->reset;
+        $silo->sync_to_filesystem;
         is_deeply( get_rec( 2, $silo), [ $store->RS_DEAD, 2, 4, 'TOOA' ], 'transaction added then removed entry' );
 
         $store->commit_transaction;
-        $silo->reset;
+        $silo->sync_to_filesystem;
         is_deeply( get_rec( 2, $silo), [ $store->RS_DEAD, 2, 4, 'TOOA' ], 'transaction added then removed entry after commit' );
         is_deeply( get_rec( 1, $silo), [ $store->RS_DEAD, 1, 4, 'OOGA' ], 'transaction added then removed entry after commit' );
     }
@@ -1502,30 +1504,88 @@ sub test_locking {
 
     my $A = fork;
     unless ( $A ) {
+        $forker->expect('start');
         my $store = Yote::RecordStore->open_store( $dir );
+        $forker->put( 'A STORE' );
+        usleep (5000);
+        my $canlock = $store->can_lock('','A') ? 'A CAN LOCK': 'A CANNOT LOCK';
         $store->lock;
-        $forker->put( "A store lock" );
-        usleep( 1000 );
+        $forker->put( $canlock );
+        usleep( 15000 );
+        $forker->put( "A TO UNLOCK" );
         $store->unlock;
+        $forker->put( "A UNLOCKED" );
         exit;
     }
 
     my $B = fork;
     unless( $B ) {
-        usleep( 1000 );
+        $forker->expect('start');
+        $forker->expect('A STORE', 'B');
         my $store = Yote::RecordStore->open_store( $dir );
-        my $canlock = $store->can_lock ? 'B CAN LOCK': 'B CANNOT LOCK';
+
+        $forker->put('B STORE');
+
+        $forker->spush('C STORE');
+
+        $forker->expect( 'A CAN LOCK', 'B' );
+        my $canlock = $store->can_lock('','B') ? 'B CAN LOCK': 'B CANNOT LOCK';
         $store->lock;
-        $forker->expect( 'A store lock' );
+        $forker->spush ("A TO UNLOCK");
         $forker->put ($canlock);
+        usleep( 8000 );
+        $forker->put( "B TO UNLOCK" );
         $store->unlock;
+        $forker->put( "B UNLOCKED" );
         exit;
     }
 
+    my $C = fork;
+    unless( $C ) {
+        $forker->expect('start' );
+        $forker->spush('A STORE');
+        $forker->expect( 'B STORE', 'C' );
+        my $store = Yote::RecordStore->open_store( $dir );
+
+        $forker->put('C STORE');
+
+        $forker->spush('A CAN LOCK', 
+                       'A TO UNLOCK', 
+                       'A UNLOCKED' );
+        $forker->expect('B CANNOT LOCK', 'C' );
+        my $canlock = $store->can_lock('','C') ? 'C CAN LOCK': 'C CANNOT LOCK';
+        $store->lock;
+
+        $forker->put ($canlock);
+
+        $forker->put( "C TO UNLOCK" );
+        $store->unlock;
+        $forker->put( "C UNLOCKED" );
+        
+        exit;
+    }
+
+    $forker->put( 'start' );
+
     waitpid $A, 0;
     waitpid $B, 0;
+    waitpid $C, 0;
+
     is_deeply( $forker->get,
-               [ 'A store lock', 'B CANNOT LOCK' ], 
+               [ 'start',
+                 'A STORE',
+                 'B STORE',
+                 'C STORE',
+                 'A CAN LOCK',
+                 'A TO UNLOCK',
+                 'A UNLOCKED',
+                 'B CANNOT LOCK',
+                 'B TO UNLOCK',
+                 'B UNLOCKED',
+                 'C CANNOT LOCK',
+                 'C TO UNLOCK',
+                 'C UNLOCKED',
+               ], 
                'store locking' );
 }
 

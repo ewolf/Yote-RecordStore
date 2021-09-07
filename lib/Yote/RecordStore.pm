@@ -63,6 +63,7 @@ including the locks that the store provides.
 
 =cut
 
+use v5.10;
 use strict;
 use warnings;
 no warnings 'numeric';
@@ -98,7 +99,7 @@ use constant {
     TRANSACTION            => 7,
     HEADER_SIZE            => 8,
     LOCK_FH                => 9,
-    LOCKS                  => 10,
+    LOCK_FILE              => 10,
     MAX_SILO_ID            => 11,
     IS_LOCKED              => 12,
 
@@ -144,22 +145,31 @@ sub open_store {
     my $lock_fh;
 
     my $silo_dir  = "$dir/data_silos";
-    
-    $lock_fh = _open($lockfile);
-    unless ($lock_fh) {
-        die "Error opening lockfile '$lockfile' : $@ $!";
-    }
 
-    unless (_flock( $lock_fh, LOCK_EX )) {
-        _err( 'open_store', 'unable to lock the recordstore' );
+    # create the lock file if it does not exist. if it cannot
+    # be locked, error out here
+    if (-e $lockfile) {
+        unless ($lock_fh = _open ($lockfile, '>' )) {
+            die "cannot open, unable to open lock file '$lockfile' to open store: $! $@";
+        }
+        $lock_fh->autoflush(1);
+        unless ($lock_fh && _flock( $lock_fh, LOCK_EX) ) {
+            die "cannot open, unable to open lock file '$lockfile' to open store: $! $@";
+        }
+    } else {
+        unless ($lock_fh = _open ($lockfile, '>' )) {
+            die "cannot open, unable to open lock file '$lockfile' to open store: $! $@";
+        }
+        $lock_fh->autoflush(1);
+        unless ($lock_fh && _flock( $lock_fh, LOCK_EX) ) {
+            die "cannot open, unable to open lock file '$lockfile' to open store: $! $@";
+        }
+        print $lock_fh "LOCK";
     }
-
-    $lock_fh->autoflush(1);
-    print $lock_fh "LOCK\n";
         
     my $vers_file = "$dir/VERSION";
     if( -e $vers_file ) {
-        open my $vers_fh, '<', $vers_file;
+        my $vers_fh = _open ($vers_file, '<' );
         my $existing_vers = <$vers_fh>;
 
         if ($existing_vers < 6.06) {
@@ -170,7 +180,7 @@ sub open_store {
         close $vers_fh;
     }
     else {
-        open my $vers_fh, '>', $vers_file;
+        my $vers_fh = _open ( $vers_file, '>');
         print $vers_fh "$VERSION\n";
         close $vers_fh;
     }
@@ -208,7 +218,7 @@ sub open_store {
         undef,
         $header_size, # the ILL from ILLa*
         $lock_fh,
-        {},
+        $lockfile,
         $max_silo_id,
     ], $cls;
     $store->[IS_LOCKED] = 1;
@@ -235,14 +245,21 @@ sub is_locked {
 
 sub can_lock {
     my ($pkg,$dir) = @_;
-    my $lockfile = "$dir/LOCK";
-    my $lock_fh = _openhandle( _open($lockfile) );
-    my $res = $lock_fh && flock( $lock_fh, LOCK_EX | LOCK_NB );
-    if ($res) {
-        flock( $lock_fh, LOCK_UN | LOCK_NB );
-        return 1;
+
+    if (ref $pkg) {
+        my $lock_fh = $pkg->[LOCK_FH] = _openhandle($pkg->[LOCK_FH]);
+        unless ($lock_fh) {
+            my $lockfile = $pkg->[LOCK_FILE];
+            $lock_fh = _open( $lockfile, '+<' );
+        }
+        my $res = _flock( $lock_fh, LOCK_EX | LOCK_NB );
+        return $res;
     }
-    return 0;
+
+    my $lockfile = "$dir/LOCK";
+    my $lock_fh = _open( $lockfile, '+<' );
+
+    return _flock( $lock_fh, LOCK_EX | LOCK_NB );        
 }
 
 sub lock {
@@ -250,22 +267,18 @@ sub lock {
 
     return 1 if $self->[IS_LOCKED];
 
-    unless (_openhandle( $self->[LOCK_FH] )) {
-        my $lockfile = "$self->[DIRECTORY]/LOCK";
-        $self->[LOCK_FH] = _open($lockfile);
-        unless ($self->[LOCK_FH]) {
-            die "$@ $!";
+    my $lock_fh = _openhandle( $self->[LOCK_FH]);
+    unless ($lock_fh) {
+        unless ($lock_fh = _open ( $self->[LOCK_FILE], '>' )) {
+            die "unable to lock: lock file $self->[LOCK_FILE] : $@ $!";
         }
     }
-
-    unless (_flock( $self->[LOCK_FH], LOCK_EX )) {
-        _err( "unlock", "unable to lock $@ $!" );
+    unless (_flock( $lock_fh, LOCK_EX )) {
+        die "unable to lock: cannot open lock file '$self->[LOCK_FILE]' to open store: $! $@";
     }
-
+    $self->[LOCK_FH] = $lock_fh;
     $self->[IS_LOCKED] = 1;
-
     $self->_reset;
-
     return 1;
 }
 
@@ -489,7 +502,7 @@ sub detect_version {
     my $ver_file = "$dir/VERSION";
     my $source_version;
     if ( -e $ver_file ) {
-        open( my $FH, "<", $ver_file );
+        my $FH = _open( $ver_file, "<" );
         $source_version = <$FH>;
         chomp $source_version;
         close $FH;
@@ -511,17 +524,15 @@ sub _warn {
 }
 
 sub _open {
-    my($file) = @_;
-    my $exists = -e $file;
+    my ($file, $mode) = @_;
     my $fh;
-    my $res = open ($fh, $exists ? '+<' : '>', $file );
-    unless ($res ) {
-        return undef;
-    }
-    unless ($exists) {
-        print $fh '';
-    }
-    return $fh;
+    my $res = CORE::open ($fh, $mode, $file);
+    return $res && $fh;
+}
+
+sub _flock {
+    my ($fh, $flags) = @_;
+    return flock($fh,$flags);
 }
 
 sub _stow {
@@ -573,11 +584,6 @@ sub _fetch {
     }
     return undef;
 } #fetch
-
-sub _flock {
-    my ($fh, $flags) = @_;
-    flock( $fh, $flags );
-}
 
 sub _openhandle {
     my $fh = shift;
@@ -694,7 +700,7 @@ sub _reset {
     my $silos = $self->silos;
     for my $silo ($index_silo, $transaction_silo, @$silos) {
         if ($silo) {
-            $silo->reset;
+            $silo->sync_to_filesystem;
         }
     }
     $self->_fix_transactions;

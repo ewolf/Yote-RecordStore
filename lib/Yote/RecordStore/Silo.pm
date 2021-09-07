@@ -87,7 +87,7 @@ sub next_id {
     return $next_id;
 } #next_id
 
-sub reset {
+sub sync_to_filesystem {
     my $self = shift;
 
     $self->[CUR_COUNT] = undef;
@@ -479,9 +479,9 @@ __END__
 
 =head2 push
 
-=head2 reset 
+=head2 sync_to_filesystem 
 
-sync up this silo with the filesystem. maybe rename this 'sync'
+force this silo to scan the filesystem to get current counts.
 
 =head2 copy_record
 

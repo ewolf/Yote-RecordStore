@@ -55,9 +55,11 @@ sub get {
 }
 
 sub expect {
-    my( $self, $what ) = @_;
+    my( $self, $what, $tag ) = @_;
     $self->spush( $what );
     while( 1 ) {
+use v5.10;
+#say "$tag: ".join(",", @{$self->get()}). ' eq '. join(",", @{$self->{stack}} );
         if( join(",", @{$self->get()}) eq join(",", @{$self->{stack}} ) ) {
             return;
         }
