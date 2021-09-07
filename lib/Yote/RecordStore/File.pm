@@ -170,24 +170,23 @@ sub open_store {
     _make_path( $lock_dir, 'lock' ) or return undef;
     _make_path( $trans_dir, 'transaction' ) or return undef;
 
-    my $index_silo = $cls->open_silo( "$dir/index_silo",
-                                      "ILQQ"); #silo id, id in silo, last updated time, created time
+    my $index_silo = Yote::RecordStore::File::Silo->open_silo( "$dir/index_silo",
+                                                               "ILQQ"); #silo id, id in silo, last updated time, created time
         
 
     $index_silo || return undef;
 
-    my $transaction_index_silo = $cls->open_silo( "$dir/transaction_index_silo",
-                                                  "IQ" ); #state, time
+    my $transaction_index_silo = Yote::RecordStore::File::Silo->open_silo( "$dir/transaction_index_silo",
+                                                                           "IQ" ); #state, time
 
     $transaction_index_silo || return undef;
 
     my $silos = [];
 
     for my $silo_id ($min_silo_id..$max_silo_id) {
-        my $silo = $silos->[$silo_id] = $cls->open_silo( "$silo_dir/$silo_id",
-                                                         'ILLa*',  # status, id, data-length, data
-                                                         2 ** $silo_id, #size
-                                                        );
+        my $silo = $silos->[$silo_id] = Yote::RecordStore::File::Silo->open_silo( "$silo_dir/$silo_id",
+                                                                                  'ILLa*',  # status, id, data-length, data
+                                                                                  2 ** $silo_id ); #size
         $silo || return undef;
     }
 
@@ -251,7 +250,7 @@ sub fetch {
         return $trans->fetch( $id );
     }
 
-    if( $id > $self->entry_count ) {
+    if( $id > $self->record_count ) {
         return undef;
     }
 
@@ -268,43 +267,13 @@ sub fetch {
 sub fetch_meta {
     my( $self, $id ) = @_;
 
-    if( $id > $self->entry_count ) {
+    if( $id > $self->record_count ) {
         return undef;
     }
 
     my( $silo_id, $id_in_silo, $update_time, $creation_time ) = @{$self->[INDEX_SILO]->get_record($id)};
     return $update_time, $creation_time;
 } #fetch_meta
-
-# update the index from ILL to ILLL
-sub __up_idx {
-    # a one off? add the creation time to the index?
-    my $self = shift;
-
-    my $dir = $self->[DIRECTORY];
-
-    my $max_file_size = $self->[MAX_FILE_SIZE];
-
-    my $old_index = $self->open_silo( "$dir/index_silo",
-                                       "ILL", #silo id, id in silo, last updated time
-                                       0,
-                                       $max_file_size );
-    my $new_index = $self->open_silo( "$dir/index_silo_new",
-                                      "ILLL", #silo id, id in silo, last updated time, creation time
-                                      0,
-                                      $max_file_size );
-    
-    my $count = $self->record_count;
-#print STDERR "$count things\n";
-    $new_index->ensure_entry_count( $count );
-    for my $id (1..$count) {
-        my( $silo_id, $id_in_silo, $update_time ) = @{$old_index->get_record($id)};
-#        print STDERR "$silo_id, $id_in_silo, $update_time\n";
-        $new_index->put_record( $id, [$silo_id,$id_in_silo,$update_time,$update_time] );
-    }
-    rename "$dir/index_silo", "$dir/index_silo_aside";
-    rename "$dir/index_silo_new", "$dir/index_silo";
-}
 
 sub stow {
     my $self = $_[0];
@@ -380,57 +349,6 @@ sub delete_record {
     }
 } #delete_record
 
-# locks the given lock names
-# they are locked in order to prevent deadlocks.
-sub lock_name {
-    my( $self, @locknames ) = @_;
-
-    my( %previously_locked ) = ( map { $_ => 1 } keys %{$self->[LOCKS]} );
-
-    if( scalar(keys %{$self->[LOCKS]}) && grep { ! $self->[LOCKS]{$_} } @locknames ) {
-        $@ = "Yote::RecordStore::File->lock cannot be called twice in a row without unlocking between";
-        return undef;
-    }
-    my $fhs = {};
-
-    my $failed;
-
-    for my $name (sort @locknames) {
-        next if $previously_locked{$name}++;
-        my $lockfile = "$self->[DIRECTORY]/user_locks/$name";
-        my $fh;
-        if( -e $lockfile ) {
-            unless( open ( $fh, '+<', $lockfile ) ) {
-                $failed = 1;
-                last;
-            }
-            flock( $fh, LOCK_EX ); #WRITE LOCK
-        }
-        else {
-            unless( open( $fh, '>', $lockfile ) ) {
-                $failed = 1;
-                last;
-            }
-            flock( $fh, LOCK_EX ); #WRITE LOCK
-            $fh->autoflush(1);
-            print $fh '';
-        }
-        $fhs->{$name} = $fh;
-    }
-
-    if( $failed ) {
-        # it must be able to lock all the locks or it fails
-        # if it failed, unlock any locks it managed to get
-        for my $fh (values %$fhs) {
-            flock( $fh, LOCK_UN );
-        }
-        $@ = "Yote::RecordStore::File->lock : lock failed";
-        return undef;
-    } else {
-        $self->[LOCKS] = $fhs;
-    }
-    return 1;
-} #lock
 
 sub use_transaction {
 return;
@@ -496,10 +414,6 @@ sub get_record_count {
     return shift->[INDEX_SILO]->entry_count;
 }
 
-sub entry_count {
-    return shift->[INDEX_SILO]->entry_count;
-}
-
 sub index_silo {
     return shift->[INDEX_SILO];
 }
@@ -527,14 +441,14 @@ sub silos_entry_count {
 }
 
 sub record_count {
-    goto &active_entry_count;
+    return shift->[INDEX_SILO]->entry_count;
 }
 
 sub active_entry_count {
     my $self = shift;
     my $index = $self->index_silo;
     my $count = 0;
-    for(1..$self->entry_count) {
+    for(1..$self->record_count) {
         my( $silo_id ) = @{$index->get_record( $_ )};
         ++$count if $silo_id;
     }
@@ -594,14 +508,6 @@ sub silo_id_for_size {
     $silo_id = $self->[MIN_SILO_ID] if $silo_id < $self->[MIN_SILO_ID];
     return $silo_id;
 } #silo_id_for_size
-
-sub open_silo {
-    my ($self, $silo_file, $template, $size, $max_file_size ) = @_;
-    return Yote::RecordStore::File::Silo->open_silo( $silo_file,
-                                                     $template,
-                                                     $size,
-                                                     $max_file_size );
-}
 
 # ---------------------- private stuffs -------------------------
 

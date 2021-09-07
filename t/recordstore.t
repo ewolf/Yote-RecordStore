@@ -236,14 +236,14 @@ sub test_locks {
 sub test_use {
     my $dir = tempdir( CLEANUP => 1 );
     my $rs = Yote::RecordStore::File->open_store($dir);
-    is ( $rs->entry_count, 0, 'starts with no entry count' );
+    is ( $rs->record_count, 0, 'starts with no entry count' );
     my $id = $rs->stow( "FOOOOF" );
-    is ( $rs->entry_count, 1, 'added one thing' );
-    is ( $rs->entry_count, $id, 'id of one thing is that of entry count' );
+    is ( $rs->record_count, 1, 'added one thing' );
+    is ( $rs->record_count, $id, 'id of one thing is that of entry count' );
     my $nid = $rs->next_id;
-    is ( $rs->entry_count, 2, 'added nuther thing' );
+    is ( $rs->record_count, 2, 'added nuther thing' );
     $id = $rs->stow( "LOOOOL", $nid );
-    is ( $rs->entry_count, 2, 'stowed that nuther thing' );
+    is ( $rs->record_count, 2, 'stowed that nuther thing' );
     is ( $rs->index_silo->entry_count, 2, 'index silo also entry count 2' );
     is ( $nid, 2, 'second id by next' );
     is ( $id, $nid, 'entry count after forced set of things' );
@@ -274,26 +274,26 @@ sub test_use {
     my $d3 = $rs->stow( "ZSMOON" ); #E 5
     $rs->stow( "SOOZ" );            #F 6
     is ( $rs->record_count, 6, "6 records stowed before delete test" );
-    is ( $rs->entry_count, 6, "6 entries before delete test" );
+    is ( $rs->record_count, 6, "6 entries before delete test" );
 
     is ( $rs->silos_entry_count, 6, "6 items in silos" );
     is ( $rs->active_entry_count, 6, "6 active items in silos" );
     # A B C D E F
     $rs->delete_record( $d1 );
     # F B C D E
-    is ( $rs->entry_count, 6, "still 6 entires after deleting penultimate" );
+    is ( $rs->record_count, 6, "still 6 entires after deleting penultimate" );
     is ( $rs->active_entry_count, 5, "5 active items in silos after delete" );
     is ( $rs->silos_entry_count, 5, "now 5 items in silos after " );
 
     $rs->delete_record( $d2 );
     # F B C E
-    is ( $rs->entry_count, 6, "still 6 entires after deleting penultimate" );
+    is ( $rs->record_count, 6, "still 6 entires after deleting penultimate" );
     is ( $rs->active_entry_count, 4, "4 active items in silos after delete" );
     is ( $rs->silos_entry_count, 4, "now 4 items in silos after " );
 
     $rs->delete_record( $d3 );
     # F B C
-    is ( $rs->entry_count, 6, "still 6 entires after deleting penultimate" );
+    is ( $rs->record_count, 6, "still 6 entires after deleting penultimate" );
     is ( $rs->active_entry_count, 3, "3 active items in silos after delete" );
     is ( $rs->silos_entry_count, 3, "now 3 items in silos after " );
 
@@ -307,19 +307,19 @@ sub test_use {
     # $rs2->use_transaction;
     # $rs2->stow( "TO NOT BE MADE" );    #3
     
-    # is ( $rs->entry_count, 3, "3 entries in trans use" );
+    # is ( $rs->record_count, 3, "3 entries in trans use" );
     # is ( $rs->active_entry_count, 2, "2 active entries in trans use as trans created block indexed in trans not in rs index" );
     # is ( $rs->silos_entry_count, 3, "3 items in silos in trans " );
 
     # $rs->delete_record( $id );
     
-    # is ( $rs->entry_count, 3, "3 entries in trans use after nontrans del" );
+    # is ( $rs->record_count, 3, "3 entries in trans use after nontrans del" );
     # is ( $rs->active_entry_count, 1, "1 active entries in trans use as not yet committed" );
     # is ( $rs->silos_entry_count, 3, "3 items in silos in trans use because in transaction entry cant be moved to vacated spot" );
     
     # $rs2->rollback_transaction;
     
-    # is ( $rs->entry_count, 3, "3 entries after trans use" );
+    # is ( $rs->record_count, 3, "3 entries after trans use" );
     # is ( $rs->active_entry_count, 1, "1 active entry after trans use" );
     # is ( $rs->silos_entry_count, 2, "2 items in silos in trans use because in transaction entry cant be moved to vacated spot" );
     

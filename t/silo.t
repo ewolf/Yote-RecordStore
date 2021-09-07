@@ -105,12 +105,10 @@ sub test_use {
     $silo->ensure_entry_count( 1 );
     is( $silo->size, $size, 'silo now with one record. correct size' );
     is( $silo->entry_count, 1, 'silo now with one record. correct count' );
-    failnice( sub { $silo->get_record(0) },
-              'index 0 out of bounds',
-              "got a record zero" );
-    failnice( sub { $silo->get_record(2) },
-              'index 2 out of bound',
-              "got a record two" );
+    is ($silo->get_record(0), undef, 'record zero');
+    like ($@, qr/index 0 out of bounds/, 'record zero error message' );
+    is ($silo->get_record(2), undef, 'record out of bounds');
+    like ($@, qr/index 2 out of bounds/, 'record out of bounds error message' );
     is_deeply( $silo->get_record( 1 ), [''], 'empty record' );
     is_deeply( $silo->peek, [''], "empty peek" );
 
@@ -172,28 +170,17 @@ sub test_use {
     is( $silo->entry_count, 40, 'silo still 40. correct count after pop' );
     is_deeply( [$silo->subsilos], [0,1,2,3], 'four subsilos still 40 entries after pop' );
 
-    eval {
-        $silo->put_record( 41, "WRONG" );
-        fail( 'was able to put record beyond end of bounds' );
-    };
+    is ( $silo->put_record( 41, "WRONG" ), undef, 'record beyond end of bounds' );
     like( $@, qr/out of bounds/, 'error message for put past entries' );
     
-    eval {
-        $silo->put_record( 0, "WRONG" );
-        fail( 'was able to put record with index of 0' );
-    };
+    is ($silo->put_record( 0, "WRONG" ), undef, 'put record with index of 0' );
+
     like( $@, qr/out of bounds/, 'error message for zero index' );
     
-    eval {
-        $silo->put_record( -1, "WRONG" );
-        fail( 'was able to put record with index < 0' );
-    };
-    like( $@, qr/out of bounds/, 'error message for wrong index' );
+    is ($silo->put_record( -1, "WRONG" ), undef, 'put record with index < 0' );
+    like( $@, qr/index -1 out of bounds/, 'error message for wrong index' );
 
-    eval {
-        $silo->put_record( 5, "WRONG".('x'x$size) );
-        fail( 'was able to put record too big' );
-    };
+    is ($silo->put_record( 5, "WRONG".('x'x$size) ), undef, 'put record too big' );
     like( $@, qr/too large/, 'error message for too big data' );
 
     unless( $is_root ) {
@@ -320,22 +307,39 @@ sub test_use {
     # test copy
     $dir = tempdir( CLEANUP => 1 );
     $silo = Yote::RecordStore::File::Silo->open_silo( $dir, 'Z*', 2 ** 12 );
-    $silo->push( "SOMETHING EXCELLENT" );
-    failnice( sub { $silo->copy_record( 1, 0 ) },
-              'out of bounds',
-              'copy to zero dest' );
-    failnice( sub { $silo->copy_record( 0, 1 ) },
-              'out of bounds',
-              'copy from zero source' );
-    failnice( sub { $silo->copy_record( 3, 1 ) },
-              'out of bounds',
-              'copy from too big source' );
-    failnice( sub { $silo->copy_record( 1, 3 ) },
-              'out of bounds',
-              'copy to too big dest' );
+    $id = $silo->push( "SOMETHING EXCELLENT" );
+    is ($id, 1, 'firsty id');
+    is_deeply( $silo->get_record(1), ['SOMETHING EXCELLENT'], 'first value' );
+    is ($silo->copy_record( 1, 0 ), undef, 'copy to zero dest' );
+    like ($@, qr/out of bounds/, 'copy to zero dest error message' );
+    undef $@;
+
+    is_deeply( $silo->get_record(1), ['SOMETHING EXCELLENT'], 'first value 1' );
+              
+    is ( $silo->copy_record( 0, 1 ), undef, 'copy from zero source' );
+    like ($@, qr/out of bounds/, 'copy from zero source message' );
+    undef $@;
+
+    is_deeply( $silo->get_record(1), ['SOMETHING EXCELLENT'], 'first value 2' );
+
+    is ( $silo->copy_record( 3, 1 ), undef, 'copy from too big source' );
+    like ($@, qr/out of bounds/, 'copy from too big source message' );
+    undef $@;
+              
+    is_deeply( $silo->get_record(1), ['SOMETHING EXCELLENT'], 'first value 3' );
+
+    is( $silo->copy_record( 1, 3 ), undef, 'copy to too big dest' );
+    like ($@, qr/out of bounds/, 'copy to too big dest message' );
+    undef $@;
+
+    is_deeply( $silo->get_record(1), ['SOMETHING EXCELLENT'], 'first value 4' );
+              
     $id = $silo->next_id;
+    is ($id,2,"next id given");
+    is ($silo->entry_count,2,'two entries');
     is_deeply( $silo->get_record(2), [''], 'nothing for new next id' );
     $silo->copy_record( 1, 2 );
+
     is_deeply( $silo->get_record(2), ['SOMETHING EXCELLENT'], 'copy worked for new id' );
     is_deeply( $silo->get_record(1), ['SOMETHING EXCELLENT'], 'original still there' );
 } #test_use

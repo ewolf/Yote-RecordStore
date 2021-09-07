@@ -193,7 +193,7 @@ sub put_record {
     my $write_size = do { use bytes; length( $to_write ) };
 
     if( $write_size > $rec_size) {
-        @$ = "Yote::RecordStore::File::Silo->put_record : record size $write_size too large. Max is $rec_size";
+        $@ = "Yote::RecordStore::File::Silo->put_record : record size $write_size too large. Max is $rec_size";
         return undef;
     }
 
@@ -274,7 +274,7 @@ sub size {
 sub copy_record {
     my( $self, $from_id, $to_id ) = @_;
     my $rec = $self->get_record($from_id);
-    unless ($self->put_record( $to_id, $rec )) {
+    unless ($rec && $self->put_record( $to_id, $rec )) {
         return undef;
     }
     return $rec;

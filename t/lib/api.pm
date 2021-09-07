@@ -48,29 +48,29 @@ sub test_stow_and_fetch_and_delete {
 #    print STDERR Data::Dumper->Dump([$sth->fetchall_arrayref,"XX"]);
     
 #    is( $store->record_count, 2, "two records in store" );
-    is( $store->entry_count, 3, "3 entries in index" );
+    is( $store->record_count, 3, "3 entries in index" );
 
     $store->stow( "X" x 8189, 2 );
 #    is( $store->record_count, 2, "still two entries" );
-    is( $store->entry_count, 3, "3 entries in index" );
+    is( $store->record_count, 3, "3 entries in index" );
 
     $store->stow( "X" x 16376, 2 ); #14
 #    is( $store->record_count, 2, "still two entries" );
-    is( $store->entry_count, 3, "3 entries in index" );
+    is( $store->record_count, 3, "3 entries in index" );
 
     is( $store->fetch(91), undef, "no record for too large a fetch" );
 
     my $sid = $store->stow( "S" x 16376 ); #14
  #   is( $store->record_count, 3, "now 3 records" );
-    is( $store->entry_count, 4, "4th entry in index" );
+    is( $store->record_count, 4, "4th entry in index" );
 
     $store->stow( "tiny", 2 );
 #    is( $store->record_count, 3, "3 records" );
-    is( $store->entry_count, 4, "still 4th entry in index" );
+    is( $store->record_count, 4, "still 4th entry in index" );
 
     $store->stow( "q" x 12, 5 );
 #    is( $store->record_count, 4, "now 4 records" );
-    is( $store->entry_count, 5, "5th entry in index" );
+    is( $store->record_count, 5, "5th entry in index" );
 
     {
         local( *STDERR );
@@ -80,27 +80,27 @@ sub test_stow_and_fetch_and_delete {
         $store->delete_record( 54 );
         like ($errout, qr/delete past end of record/, 'delete past end of ' );
 #    is( $store->record_count, 4, "now 4 records" );
-        is( $store->entry_count, 5, "5th entry in index" );
+        is( $store->record_count, 5, "5th entry in index" );
     }
 
     $store = $rs_factory->new_rs;
     $store->stow( "FOO", 1 );
-    is( $store->entry_count, 1, "ONE THING" );
+    is( $store->record_count, 1, "ONE THING" );
     $store->stow( "BAR", 1 );
-    is( $store->entry_count, 1, "still ONE THING" );
+    is( $store->record_count, 1, "still ONE THING" );
     
     my $id = $store->stow( "BAAAAAAAAGS" );
     $store->stow( "H", $id );
     is( $store->fetch( $id ), "H", "didn't pop out" );
-    is( $store->entry_count, 2, "2 entries" );
+    is( $store->record_count, 2, "2 entries" );
 #    is( $store->record_count, 2, "2 records" );
     
     $store->stow( "B" x 5000, $id );
-    is( $store->entry_count, 2, "2 entries" );
+    is( $store->record_count, 2, "2 entries" );
 #    is( $store->record_count, 2, "2 records" );
 
     $store->stow( "t", $id );
-    is( $store->entry_count, 2, "2 entries" );
+    is( $store->record_count, 2, "2 entries" );
 #    is( $store->record_count, 2, "2 records" );
 
 
@@ -135,7 +135,7 @@ sub test_recordstore {
     my( $cls, $rs_factory ) = @_;
 
     my $store = $rs_factory->new_rs;
-    is( $store->entry_count, 0, 'no entries in new store' );
+    is( $store->record_count, 0, 'no entries in new store' );
 
     my $id  = $store->stow( "FOO FOO" );
 
@@ -144,7 +144,7 @@ sub test_recordstore {
     my $id3 = $store->stow( "Käse essen" );
 
     # store with 3 entries
-    is( $store->entry_count, 3, "store 3 entries" );
+    is( $store->record_count, 3, "store 3 entries" );
     $store = $rs_factory->reopen( $store );
     is( $id2, $id + 1, "Incremental object ids" );
     is( $store->fetch( $id ), "FOO FOO", "first item saved" );
@@ -160,18 +160,18 @@ sub test_recordstore {
     $id = $store->stow( "x" x 4087 ); #12
     $store->stow( "x" x 8187 ); # 13
 
-    is( $store->entry_count, 2, "two entry count in store" );
+    is( $store->record_count, 2, "two entry count in store" );
 #    is( $store->record_count, 2, "two record count in store" );
 
     my $yid = $store->stow( "y" ); #real small, should still be in 12 which is the minimum
     is( $yid, 3, "Third ID" );
 
-    is( $store->entry_count, 3, "3 entry count in store" );
+    is( $store->record_count, 3, "3 entry count in store" );
 #    is( $store->record_count, 3, "3 record count in store" );
 
     $store->stow( "x" x 8188, $id );  # 12 is max 4092, 13 is max 8187
 
-    is( $store->entry_count, 3, "still 3 entry count in store" );
+    is( $store->record_count, 3, "still 3 entry count in store" );
 #    is( $store->record_count, 3, "still 3 record count in store" );
 
     is( $store->fetch( $yid ), "y", "correctly relocated data" );
@@ -180,48 +180,48 @@ sub test_recordstore {
 
     $store->stow( "x" x 90, $id );
 
-    is( $store->entry_count, 3, "yet still 3 entry count in store" );
+    is( $store->record_count, 3, "yet still 3 entry count in store" );
 #    is( $store->record_count, 3, "yet still 3 record count in store" );
 
     my $xid = $store->stow( "x" x 90 );
 
-    is( $store->entry_count, 4, "now 4 entry count in store" );
+    is( $store->record_count, 4, "now 4 entry count in store" );
 #    is( $store->record_count, 4, "now 4 record count in store" );
 
     $store->delete_record( $id );
 
-    is( $store->entry_count, 4, "still 4 entry count in store after delete" );
+    is( $store->record_count, 4, "still 4 entry count in store after delete" );
 #    is( $store->record_count, 3, "now 3 record count in store after delete" );
 
     $store = $rs_factory->new_rs;
     
-    is( $store->entry_count, 0, "empty then no entries" );
+    is( $store->record_count, 0, "empty then no entries" );
 #    is( $store->record_count, 0, "empty then no records" );
 
     $store->stow( "BOOGAH", 4 );
     is( $store->next_id, '5', "next id is 5" );
-    is( $store->entry_count, 5, "5 entries after skipping ids plus asking to generate the next one" );
+    is( $store->record_count, 5, "5 entries after skipping ids plus asking to generate the next one" );
 #    is( $store->record_count, 1, "one record at id 4" );
 
     is( $store->fetch( 4 ), "BOOGAH", "record hasnt changed" );
 
     $store->stow( "TEN", 10 );
-    is( $store->entry_count, 10, "entry count explicitly set" );
+    is( $store->record_count, 10, "entry count explicitly set" );
 #    is( $store->record_count, 2, "now 2 record count in store after delete after explicit set" );
     is( $store->fetch( 10 ), "TEN", "got the 10 stow" );
     is( $store->next_id, 11, 'after entry count being set' );
-    is( $store->entry_count, 11, "entry count explicitly set" );
+    is( $store->record_count, 11, "entry count explicitly set" );
     is( $store->next_id, 12, 'next again' );
-    is( $store->entry_count, 12, "entry count explicitly set" );
+    is( $store->record_count, 12, "entry count explicitly set" );
 
 
     $store->stow( "x" x 90 );
-    is( $store->entry_count, 13, "now 13 entry count in store after stow" );
+    is( $store->record_count, 13, "now 13 entry count in store after stow" );
 #    is( $store->record_count, 3, "now 3 record count in store after stow" );
 
     $xid = $store->stow( "x" x 90 );
 
-    is( $store->entry_count, 14, "now 14 entry count in store after stow" );
+    is( $store->record_count, 14, "now 14 entry count in store after stow" );
 #    is( $store->record_count, 4, "now 4 record count in store after stow" );
 
 
