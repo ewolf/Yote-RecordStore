@@ -114,18 +114,8 @@ use constant {
     TR_COMPLETE       => 7,
 };
 
-sub _err {
-    my ($method,$txt) = @_;
-    print STDERR Data::Dumper->Dump([longmess]);
-    die __PACKAGE__."::$method $txt";
-}
 
-sub _warn {
-    my ($method,$txt) = @_;
-    warn __PACKAGE__."::$method $txt";
-}
-
-=head2 open_store( options )
+=head2 open_store( directory )
 
 Constructs a data store according to the options.
 
@@ -234,30 +224,6 @@ sub open_store {
     return $store;
 } #open_store
 
-sub _open {
-    my($file) = @_;
-    my $exists = -e $file;
-    my $fh;
-    my $res = open ($fh, $exists ? '+<' : '>', $file );
-    unless ($res ) {
-        die "$@ $!";
-    }
-    unless ($exists) {
-        print $fh '';
-    }
-    return $fh;
-}
-
-sub _flock {
-    my ($fh, $flags) = @_;
-    flock( $fh, $flags );
-}
-
-sub _openhandle {
-    my $fh = shift;
-    openhandle( $fh );
-}
-
 sub directory {
     shift->[DIRECTORY];
 }
@@ -337,20 +303,6 @@ sub fetch {
     $self->_fetch( $id );
 } #fetch
 
-sub _fetch {
-    my( $self, $id ) = @_;
-
-    if( $id > $self->record_count ) {
-        warn "fetch past end of records";
-        return undef;
-    }
-    my( $silo_id, $id_in_silo, $update_time, $creation_time ) = @{$self->[INDEX_SILO]->get_record($id)};
-    if( $silo_id ) {
-        my $ret = $self->[SILOS]->[$silo_id]->get_record( $id_in_silo );
-        return $update_time, $creation_time, substr( $ret->[3], 0, $ret->[2] );
-    }
-    return undef;
-} #fetch
 
 sub fetch_meta {
     my( $self, $id ) = @_;
@@ -383,46 +335,7 @@ sub stow {
     return $self->_stow( $data, $id );
 }
 
-sub _stow {
-    my ($self, $data, $id, $rs_override ) = @_;
 
-    my $index = $self->[INDEX_SILO];
-
-    if( defined $id && ($id < 1|| int($id) != $id)) {
-        _err( 'stow', "id when supplied must be a positive integer" );
-    }
-
-    $index->ensure_entry_count( $id );
-
-    my( $old_silo_id, $old_id_in_silo, $old_creation_time );
-    if( $id > 0 ) {
-       ( $old_silo_id, $old_id_in_silo, undef, $old_creation_time ) = @{$index->get_record($id)};
-    }
-    else {
-        $id = $index->next_id;
-    }
-
-    my $data_write_size = do { use bytes; length $data };
-    my $new_silo_id = $self->_silo_id_for_size( $data_write_size );
-    my $new_silo = $self->[SILOS][$new_silo_id];
-
-    my $new_id_in_silo = $new_silo->push( [$rs_override || RS_ACTIVE, $id, $data_write_size, $data] );
-
-    my $t = _time();
-
-    $index->put_record( $id, [$new_silo_id,$new_id_in_silo, $t, $old_creation_time ? $old_creation_time : $t] );
-
-    if( $old_silo_id ) {
-        $self->_mark( $old_silo_id, $old_id_in_silo, RS_DEAD );
-    }
-
-    return $id;
-} #stow
-
-sub _mark {
-    my ($self, $silo_id, $id_in_silo, $rs ) = @_;
-    $self->[SILOS][$silo_id]->put_record( $id_in_silo, [ $rs ], 'I' );
-}
 
 sub next_id {
     my $self = shift;
@@ -449,6 +362,11 @@ sub delete_record {
     if( $trans ) {
         return $trans->delete_record( $del_id );
     }
+    return $self->_delete_record( $del_id );
+} #delete_record
+
+sub _delete_record {
+    my( $self, $del_id ) = @_;
 
     if( $del_id > $self->[INDEX_SILO]->entry_count ) {
         _err( 'delete_record', "Tried to delete past end of records" );
@@ -460,7 +378,7 @@ sub delete_record {
     if( $old_silo_id ) {
         $self->_mark( $old_silo_id, $old_id_in_silo, RS_DEAD );
     }
-} #delete_record
+} #_delete_record
 
 
 sub use_transaction {
@@ -561,7 +479,8 @@ sub active_entry_count {
     my $index = $self->index_silo;
     my $count = 0;
     for(1..$self->record_count) {
-        my( $silo_id ) = @{$index->get_record( $_ )};
+#        my( $silo_id ) = @{$index->get_record( $_ )};
+        my( $silo_id, $iis ) = @{$index->get_record( $_ )};
         ++$count if $silo_id;
     }
     return $count;
@@ -580,6 +499,99 @@ sub detect_version {
     return $source_version;
 } #detect_version
 
+# ---------------------- private stuffs -------------------------
+
+sub _err {
+    my ($method,$txt) = @_;
+    print STDERR Data::Dumper->Dump([longmess]);
+    die __PACKAGE__."::$method $txt";
+}
+
+sub _warn {
+    my ($method,$txt) = @_;
+    warn __PACKAGE__."::$method $txt";
+}
+
+sub _open {
+    my($file) = @_;
+    my $exists = -e $file;
+    my $fh;
+    my $res = open ($fh, $exists ? '+<' : '>', $file );
+    unless ($res ) {
+        die "$@ $!";
+    }
+    unless ($exists) {
+        print $fh '';
+    }
+    return $fh;
+}
+
+sub _stow {
+    my ($self, $data, $id, $rs_override ) = @_;
+
+    my $index = $self->[INDEX_SILO];
+
+    if( defined $id && ($id < 1|| int($id) != $id)) {
+        _err( 'stow', "id when supplied must be a positive integer" );
+    }
+
+    $index->ensure_entry_count( $id );
+
+    my( $old_silo_id, $old_id_in_silo, $old_creation_time );
+    if( $id > 0 ) {
+       ( $old_silo_id, $old_id_in_silo, undef, $old_creation_time ) = @{$index->get_record($id)};
+    }
+    else {
+        $id = $index->next_id;
+    }
+
+    my $data_write_size = do { use bytes; length $data };
+    my $new_silo_id = $self->_silo_id_for_size( $data_write_size );
+    my $new_silo = $self->[SILOS][$new_silo_id];
+
+    my $new_id_in_silo = $new_silo->push( [$rs_override || RS_ACTIVE, $id, $data_write_size, $data] );
+
+    my $t = _time();
+
+    $index->put_record( $id, [$new_silo_id,$new_id_in_silo, $t, $old_creation_time ? $old_creation_time : $t] );
+
+    if( $old_silo_id ) {
+        $self->_mark( $old_silo_id, $old_id_in_silo, RS_DEAD );
+    }
+
+    return $id;
+} #_stow
+
+sub _fetch {
+    my( $self, $id ) = @_;
+
+    if( $id > $self->record_count ) {
+        warn "fetch past end of records";
+        return undef;
+    }
+    my( $silo_id, $id_in_silo, $update_time, $creation_time ) = @{$self->[INDEX_SILO]->get_record($id)};
+    if( $silo_id ) {
+        my $ret = $self->[SILOS]->[$silo_id]->get_record( $id_in_silo );
+        return $update_time, $creation_time, substr( $ret->[3], 0, $ret->[2] );
+    }
+    return undef;
+} #fetch
+
+sub _flock {
+    my ($fh, $flags) = @_;
+    flock( $fh, $flags );
+}
+
+sub _openhandle {
+    my $fh = shift;
+    openhandle( $fh );
+}
+
+sub _mark {
+    my ($self, $silo_id, $id_in_silo, $rs ) = @_;
+    $self->[SILOS][$silo_id]->put_record( $id_in_silo, [ $rs ], 'I' );
+}
+
 sub _time {
     int(time * 1000);
 }
@@ -595,7 +607,7 @@ sub _vacuum {
 
         my $start_id = 1;
         while ($start_id <= $silo->entry_count) {
-            my( $rec_state ) = (@{$silo->get_record( $start_id, 'I' )});
+            my( $rec_state, $id ) = (@{$silo->get_record( $start_id, 'I' )});
             if ($rec_state != RS_ACTIVE) {
                 # potentially swap out to end
                 $self->_vacate( $silo_id, $start_id );
@@ -657,8 +669,6 @@ sub _silo_id_for_size {
     $silo_id = $self->[MIN_SILO_ID] if $silo_id < $self->[MIN_SILO_ID];
     return $silo_id;
 } #_silo_id_for_size
-
-# ---------------------- private stuffs -------------------------
 
 sub _open_silo {
     my ($self, $silo_file, $template, $size, $max_file_size ) = @_;

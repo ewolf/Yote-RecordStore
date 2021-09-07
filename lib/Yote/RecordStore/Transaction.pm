@@ -137,28 +137,11 @@ sub commit {
         if ($action == RS_ACTIVE ) {
             # create or update
             $store_index->put_record( $rec_id, [$trans_silo_id,$trans_id_in_silo], 'IL' );
-        }
-        else {
-            # remove
-            $store_index->put_record( $rec_id, [0,0], 'IL' );
-        }
-    }
-
-    my (%silo_ids);
-    #
-    # now update the data silo records to make these active
-    # 
-    for my $id (@update_ids) {
-        my ($action, $rec_id, $orig_silo_id, $orig_id_in_silo, $trans_silo_id, $trans_id_in_silo ) = @{$updates->{$id}};
-        $silo_ids{$trans_silo_id} = 1;
-        $silo_ids{$orig_silo_id} = 1;
-
-        if ($action == RS_ACTIVE ) {
-            # create or update
             $store_silos->[$trans_silo_id]->put_record( $trans_id_in_silo, [ RS_ACTIVE ], 'I' );
         }
         else {
             # remove
+            $store_index->put_record( $rec_id, [0,0], 'IL' );
             $store->silos->[$orig_silo_id]->put_record( $orig_id_in_silo, [RS_DEAD], 'I' );
         }
     }
@@ -168,10 +151,8 @@ sub commit {
     #
     $store->transaction_silo->put_record( $self->{trans_id}, [TR_COMPLETE], 'I' );
 
-    # mark the trans object as dead
-    my ($trans_obj_silo_id, $trans_obj_id_in_silo ) = @{$store->[$store->INDEX_SILO]->get_record($trans_obj_id)};
-    
-    $store->_mark( $trans_obj_silo_id, $trans_obj_id_in_silo, RS_DEAD );
+    # delete the trans object
+    $store->_delete_record( $trans_obj_id );
     
     # remove the transaction itself
     $store->transaction_silo->pop;

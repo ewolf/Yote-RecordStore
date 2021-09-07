@@ -284,6 +284,88 @@ sub big {
 }
 
 sub test_cleanup {
+    {
+        # test a transaction that gets to the marked completed stage, but doesn't do the cleanup steps
+        # after that
+        my $dir = tempdir( CLEANUP => 1 );
+    
+        my $rs = Yote::RecordStore->open_store( $dir );
+
+        my $silo = $rs->silos->[12];
+        my $bsilo = $rs->silos->[13];
+        my $isilo = $rs->index_silo;
+        my $tsilo = $rs->transaction_silo;
+
+        $rs->lock;
+        $rs->stow( "AA" ); #1
+        $rs->stow( "BB" ); #2
+        $rs->stow( "CC" ); #3
+        $rs->stow( "DD" ); #4
+        $rs->stow( "EE" ); #5
+        $rs->stow( "FF" ); #6
+
+        $rs->delete_record( 3 );
+        
+        my $sis = sub {
+            my( $sid, $id, $stat, $val ) = @_;
+            is_deeply( get_rec($sid, $silo), [$stat,$id,length($val),$val], "rec $val $id - 12/$sid" );
+        };
+        $sis->( 1, 1, $rs->RS_ACTIVE, "AA" );
+        $sis->( 2, 2, $rs->RS_ACTIVE, "BB" );
+        $sis->( 3, 3, $rs->RS_DEAD, "CC" );
+        $sis->( 4, 4, $rs->RS_ACTIVE, "DD" );
+        $sis->( 5, 5, $rs->RS_ACTIVE, "EE" );
+        $sis->( 6, 6, $rs->RS_ACTIVE, "FF" );
+
+        $rs->_vacuum;
+
+        is ($rs->active_entry_count, 5, '5 active entries active' );
+        
+        $rs->unlock;
+    }
+    {
+        # test a transaction that gets to the marked completed stage, but doesn't do the cleanup steps
+        # after that
+        my $dir = tempdir( CLEANUP => 1 );
+    
+        my $rs = Yote::RecordStore->open_store( $dir );
+
+        my $silo = $rs->silos->[12];
+        my $bsilo = $rs->silos->[13];
+        my $isilo = $rs->index_silo;
+        my $tsilo = $rs->transaction_silo;
+
+        $rs->lock;
+        $rs->use_transaction;
+        $rs->stow( "AA" ); #1
+        $rs->stow( "BB" ); #2
+        $rs->stow( "CC" ); #3
+        $rs->stow( "DD" ); #4
+        $rs->stow( "EE" ); #5
+        $rs->stow( "FF" ); #6
+
+        $rs->delete_record( 3 );
+
+        $rs->commit_transaction;
+        
+        my $sis = sub {
+            my( $sid, $id, $stat, $val ) = @_;
+            is_deeply( get_rec($sid, $silo), [$stat,$id,length($val),$val], "rec $val $id - 12/$sid" );
+        };
+        $sis->( 1, 1, $rs->RS_ACTIVE, "AA" );
+        $sis->( 2, 2, $rs->RS_ACTIVE, "BB" );
+        $sis->( 3, 3, $rs->RS_DEAD, "CC" );
+        $sis->( 4, 4, $rs->RS_ACTIVE, "DD" );
+        $sis->( 5, 5, $rs->RS_ACTIVE, "EE" );
+        $sis->( 6, 6, $rs->RS_ACTIVE, "FF" );
+
+
+        $rs->_vacuum;
+
+        is ($rs->active_entry_count, 5, '5 active entries active' );
+        
+        $rs->unlock;
+    }
     my $dir = tempdir( CLEANUP => 1 );
     {
         # test a transaction that gets to the marked completed stage, but doesn't do the cleanup steps
@@ -406,6 +488,10 @@ sub test_cleanup {
         $bis->( 6, 2, $rs->RS_ACTIVE, "L" );
 
         $rs->_vacuum;
+        
+        # check the active entry count
+        is ($rs->active_entry_count, 11, '11 active entries now' );
+
 
         is ($silo->entry_count, 6, '6 in small silo' );
         is ($bsilo->entry_count, 5, '5 in large silo' );
@@ -1301,6 +1387,7 @@ sub test_transactions {
 
             $store->_vacuum;
             is ($silo->entry_count, 0, '2 entries cleaned up');
+
         }
 
     }
