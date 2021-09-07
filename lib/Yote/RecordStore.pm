@@ -236,9 +236,8 @@ sub is_locked {
 sub can_lock {
     my ($pkg,$dir) = @_;
     my $lockfile = "$dir/LOCK";
-    my $exists = -e $lockfile;
     my $lock_fh = _openhandle( _open($lockfile) );
-    my $res = flock( $lock_fh, LOCK_EX | LOCK_NB );
+    my $res = $lock_fh && flock( $lock_fh, LOCK_EX | LOCK_NB );
     if ($res) {
         flock( $lock_fh, LOCK_UN | LOCK_NB );
         return 1;
@@ -517,7 +516,7 @@ sub _open {
     my $fh;
     my $res = open ($fh, $exists ? '+<' : '>', $file );
     unless ($res ) {
-        die "$@ $!";
+        return undef;
     }
     unless ($exists) {
         print $fh '';
@@ -582,7 +581,7 @@ sub _flock {
 
 sub _openhandle {
     my $fh = shift;
-    openhandle( $fh );
+    $fh && openhandle( $fh );
 }
 
 sub _mark {

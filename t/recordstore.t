@@ -4,6 +4,7 @@ use warnings;
 no warnings 'uninitialized';
 
 use lib 't/lib';
+use forker;
 
 use Data::Dumper;
 
@@ -16,6 +17,7 @@ use File::Temp qw/ :mktemp tempfile tempdir /;
 use File::Path qw/ remove_tree /;
 use Scalar::Util qw(openhandle);
 use Test::More;
+use Time::HiRes qw(usleep);
 #use Errno qw(ENOENT);
 
 
@@ -41,6 +43,8 @@ test_meta();
 test_vacate();
 
 test_misc();
+
+test_locking();
 
 done_testing;
 exit;
@@ -92,9 +96,8 @@ sub get_rec {
 sub test_misc {
     my $dir = tempdir( CLEANUP => 1 );
     chmod 0444, $dir;
-    failnice( sub{Yote::RecordStore::_open( "$dir/foo" )},
-              'Permission denied',
-              'open write only file' );
+    is (Yote::RecordStore::_open( "$dir/foo" ), undef,
+        'open write only file' );
     chmod 0666, $dir;
 }
 
@@ -1488,5 +1491,42 @@ sub test_meta {
     }
 }
 
+sub test_locking {
+    my $dir = tempdir( CLEANUP => 1 );
+
+    my $forker = forker->new( $dir );
+
+    $forker->init();
+
+
+
+    my $A = fork;
+    unless ( $A ) {
+        my $store = Yote::RecordStore->open_store( $dir );
+        $store->lock;
+        $forker->put( "A store lock" );
+        usleep( 1000 );
+        $store->unlock;
+        exit;
+    }
+
+    my $B = fork;
+    unless( $B ) {
+        usleep( 1000 );
+        my $store = Yote::RecordStore->open_store( $dir );
+        my $canlock = $store->can_lock ? 'B CAN LOCK': 'B CANNOT LOCK';
+        $store->lock;
+        $forker->expect( 'A store lock' );
+        $forker->put ($canlock);
+        $store->unlock;
+        exit;
+    }
+
+    waitpid $A, 0;
+    waitpid $B, 0;
+    is_deeply( $forker->get,
+               [ 'A store lock', 'B CANNOT LOCK' ], 
+               'store locking' );
+}
 
 __END__
