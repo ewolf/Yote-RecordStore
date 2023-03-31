@@ -26,6 +26,7 @@ use constant {
     MAX_FILE_SIZE       => 4,
     RECORDS_PER_SUBSILO => 5,
     CUR_COUNT           => 6,
+    ARGS                => 7,
 };
 
 sub _die {
@@ -35,9 +36,11 @@ sub _die {
 }
 
 sub open_silo {
-    my( $class, $dir, $template, $size, $max_file_size ) = @_;
+    my( $class, $dir, $template, %args ) = @_;
 
-    if( ! $dir ) {
+    my ($size, $max_file_size) = @args{qw( size max_file_size ) };
+
+    if( ! $dir ){ 
         _die( 'open_silo', "must supply directory to open silo" );
     }
     if( ! $template ) {
@@ -77,6 +80,8 @@ sub open_silo {
         $record_size,
         $max_file_size,
         int($max_file_size / $record_size),
+        undef,
+        {%args},
         ], $class;
 } #open_silo
 
@@ -254,7 +259,7 @@ sub empty_silo {
     my $dir = $self->[DIRECTORY];
     for my $file ($self->subsilos) {
         if( $file eq '0' ) {
-            my $fh = _open( '+<', "$dir/0" );
+            my $fh = $self->_open_fh( '+<', "$dir/0" );
             unless ($fh) {
                 _die( "unable to reset silo file $dir/0: $@ $!" );
             }
@@ -305,7 +310,7 @@ sub ensure_entry_count {
         if( $records_needed_to_fill > 0 ) {
             # fill the last file up with \0
 #            my $fh = cacheout "+<", 
-            my $fh = _open( '+<', "$dir/$write_file" );
+            my $fh = $self->_open_fh( '+<', "$dir/$write_file" );
             unless ($fh) {
                 _die( 'ensure_entry_count', "unable to open $dir/$write_file : $@ $!" );
             }
@@ -325,7 +330,7 @@ sub ensure_entry_count {
             if( -e "$dir/$write_file" ) {
                 _die( 'ensure_entry_count', "file $dir/$write_file already exists" );
             }
-            my $fh = _open( ">", "$dir/$write_file" );
+            my $fh = $self->_open_fh( ">", "$dir/$write_file" );
             unless ($fh) {
                 _die( 'ensure_entry_count', "could not open file '$dir/$write_file' : $! $@" );
             }
@@ -346,7 +351,7 @@ sub ensure_entry_count {
             if( -e "$dir/$write_file" ) {
                 _die( 'ensure_entry_count', "file $dir/$write_file already exists" );
             }
-            my $fh = _open( ">", "$dir/$write_file" );
+            my $fh = $self->_open_fh( ">", "$dir/$write_file" );
             
 #            $fh->autoflush(1);
             print $fh '';
@@ -396,13 +401,20 @@ sub _fh {
     my $subsilo_idx = int( ($id-1) / $rec_per_subsilo );
     my $idx_in_f = ($id - ($subsilo_idx*$rec_per_subsilo)) - 1;
 
-    my $fh = _open ("+<", "$dir/$subsilo_idx");
+    my $fh = $self->_open_fh("+<", "$dir/$subsilo_idx");
     unless( $fh ) {
         _die( '_fh', "$dir/$subsilo_idx : $!" );
     }
     return $idx_in_f, $fh, $subsilo_idx;
 
 } #_fh
+
+sub _open_fh {
+    my ($self, $mod, $file) = @_;
+    my $fh = _open( $mod, $file );
+    $self->[ARGS]{blocking} && $fh->blocking(1);
+    return $fh;
+}
 
 sub _open {
     my( $mod, $file) = @_;

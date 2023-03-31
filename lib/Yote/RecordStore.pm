@@ -102,6 +102,7 @@ use constant {
     LOCK_FILE              => 10,
     MAX_SILO_ID            => 11,
     IS_LOCKED              => 12,
+    ARGS                   => 13,
 
     # record state
     RS_ACTIVE         => 1,
@@ -123,7 +124,7 @@ Constructs a data store according to the options.
 =cut
 
 sub open_store {
-    my( $cls, $dir ) = @_;
+    my( $cls, $dir, %args ) = @_;
 
     unless( -d $dir ) {
         _make_path( $dir, \my $err, 'base' );
@@ -188,36 +189,44 @@ sub open_store {
         _err( 'open_store', "unable to make silo directory.". join( ", ", map { $_->{$silo_dir} } @$err ) );
     }
 
-    my $index_silo = $cls->_open_silo( "$dir/index_silo",
-                                      "ILQQ"); #silo id, id in silo, last updated time, created time
-
-    my $transaction_index_silo = $cls->_open_silo( "$dir/transaction_index_silo",
-                                                  "IL" ); #state, trans id
+    my $index_silo = $cls->_open_silo( 
+        "$dir/index_silo",
+        "ILQQ", #silo id, id in silo, last updated time, created time
+        blocking => 1,
+        ); 
+    
+    my $transaction_index_silo = $cls->_open_silo(
+        "$dir/transaction_index_silo",
+        "IL", #state, trans id
+        blocking => 1,
+        ); 
 
     my $silos = [];
 
     for my $silo_id ($min_silo_id..$max_silo_id) {
         my $silo = $silos->[$silo_id] = $cls->_open_silo( "$silo_dir/$silo_id",
                                                          'ILLa*',  # status, id, data-length, data
-                                                         2 ** $silo_id ); #size
+                                                         size => 2 ** $silo_id ); #size
     }
 
     my $header = pack( 'ILL', 1,2,3 );
     my $header_size = do { use bytes; length( $header ) };
 
     my $store = bless [
-        $dir,
+        $dir,                                   
         undef,
         $max_file_size,
         $min_silo_id,
         $index_silo,
         $silos,
         $transaction_index_silo,
-        undef,
+        undef,  # 7
         $header_size, # the ILL from ILLa*
         $lock_fh,
         $lockfile,
         $max_silo_id,
+        undef,
+        {%args},
     ], $cls;
 
     $store->[IS_LOCKED] = 1;
@@ -268,9 +277,12 @@ sub lock {
             die "unable to lock: lock file $self->[LOCK_FILE] : $@ $!";
         }
     }
+    $lock_fh->blocking( 1 );
+    $self->_log( "$$ try to lock" );
     unless (_flock( $lock_fh, LOCK_EX )) {
         die "unable to lock: cannot open lock file '$self->[LOCK_FILE]' to open store: $! $@";
     }
+    $self->_log( "$$ locked" );
     $self->[LOCK_FH] = $lock_fh;
     $self->[IS_LOCKED] = 1;
 
@@ -296,9 +308,13 @@ sub unlock {
     }
 
     $self->[IS_LOCKED] = 0;
+    $self->_log( "$$ try to unlock" );
     unless (_flock( $self->[LOCK_FH], LOCK_UN ) ) {
         _err( "unlock", "unable to unlock $@ $!" );
     }
+    $self->[LOCK_FH] && $self->[LOCK_FH]->close;
+    undef $self->[LOCK_FH];
+    $self->_log( "$$ unlocked" );
 }
 
 =item fetch(id)
@@ -416,7 +432,7 @@ sub _delete_record {
     my( $old_silo_id, $old_id_in_silo ) = @{$self->[INDEX_SILO]->get_record($del_id)};
     my $t = _time();
 
-    $self->_log( "DELETE $del_id from $old_silo_id/$old_id_in_silo $t\n" );
+    $self->_log( "$$ DELETE \%$del_id from $old_id_in_silo/$old_silo_id $t" );
 
     $self->[INDEX_SILO]->put_record( $del_id, [0,0,$t,$t] );
 
@@ -612,19 +628,20 @@ sub _open {
     my $fh;
     my $res = CORE::open ($fh, $mode, $file);
     if ($res) {
+        $fh->blocking( 1 );
         return $fh;
     }
 }
 
 sub _flock {
     my ($fh, $flags) = @_;
-    if ($fh){
-        return flock($fh,$flags);
-    }
+    return $fh && flock($fh,$flags);
 }
 
 sub _log {
     my ($self, $logstr) = @_;
+    return if $self->[ARGS]{nolog};
+#    print STDERR "$logstr\n";
     my $logfile = "$self->[0]/LOG";
     `touch $logfile`;
     open my $fh, '>>', $logfile;
@@ -658,11 +675,34 @@ sub _stow {
 
     my $t = _time();
 
-    $self->_log( "STOW $id ($data_write_size bytes) to $new_silo_id/$new_id_in_silo $t\n" );
+    $self->_log( "$$ STOW \%$id ($data_write_size bytes) to $new_id_in_silo/$new_silo_id $t" );
 
     $index->put_record( $id, [$new_silo_id,$new_id_in_silo, $t, $old_creation_time ? $old_creation_time : $t] );
 
     if( $old_silo_id ) {
+#
+# why could this not be marked as dead?
+#
+#$VAR1 = ' at lib/Yote/RecordStore/Silo.pm line 148.
+# 	Yote::RecordStore::Silo::_put_record(Yote::RecordStore::Silo=ARRAY(0x55aa85b42b40), 21, ARRAY(0x55aa862d2868), "I") called at lib/Yote/RecordStore/Silo.pm line 143
+# 	Yote::RecordStore::Silo::put_record(Yote::RecordStore::Silo=ARRAY(0x55aa85b42b40), 21, ARRAY(0x55aa862d2868), "I") called at lib/Yote/RecordStore.pm line 700
+# 	Yote::RecordStore::_mark(Yote::RecordStore=ARRAY(0x55aa85e2d298), 14, 21, 2) called at lib/Yote/RecordStore.pm line 670
+# 	Yote::RecordStore::_stow(Yote::RecordStore=ARRAY(0x55aa85e2d298), "\\x{d}\\x{0}\\x{0}\\x{0}GRU::IntArray\\x{d2}\\x{0}\\x{0}\\x{0}\\x{2}\\x{0}\\x{0}\\x{0}\\x{4}\\x{0}\\x{0}\\x{0}! \\x{1}\\x{0}datav\\x{a7}\\x{1}\\x{0}\\x{0}\\x{f7}\\x{5}\\x{0}\\x{0}~\\x{2}\\x{0}\\x{0}\\x{e2}\\x{2}\\x{0}\\x{0}\\x{9f}4\\x{0}\\x{0}!\\x{1}\\x{0}"..., 210) called at lib/Yote/RecordStore.pm line 366
+# 	Yote::RecordStore::stow(Yote::RecordStore=ARRAY(0x55aa85e2d298), "\\x{d}\\x{0}\\x{0}\\x{0}GRU::IntArray\\x{d2}\\x{0}\\x{0}\\x{0}\\x{2}\\x{0}\\x{0}\\x{0}\\x{4}\\x{0}\\x{0}\\x{0}! \\x{1}\\x{0}datav\\x{a7}\\x{1}\\x{0}\\x{0}\\x{f7}\\x{5}\\x{0}\\x{0}~\\x{2}\\x{0}\\x{0}\\x{e2}\\x{2}\\x{0}\\x{0}\\x{9f}4\\x{0}\\x{0}!\\x{1}\\x{0}"..., 210) called at lib/Yote/ObjectStore.pm line 198
+# 	Yote::ObjectStore::save(Yote::ObjectStore=ARRAY(0x55aa85fe78a0)) called at lib/GRU/Base.pm line 97
+# 	GRU::Base::save(GRU::Populator=ARRAY(0x55aa85fe7b70), "saving exem 521") called at lib/GRU/Populator.pm line 206
+# 	GRU::Populator::provide_base_pop(GRU::Populator=ARRAY(0x55aa85fe7b70), "./t/speed_test_files/2000_exems.txt") called at t/populator_speed_test.pl line 44
+# 	main::run_base_async() called at t/populator_speed_test.pl line 37
+# 	main::__ANON__ called at (eval 15) line 1
+# 	Benchmark::__ANON__() called at /usr/share/perl/5.34/Benchmark.pm line 722
+# 	Benchmark::runloop(3, CODE(0x55aa85e2a990)) called at /usr/share/perl/5.34/Benchmark.pm line 753
+# 	Benchmark::timeit(3, CODE(0x55aa85e2a990)) called at /usr/share/perl/5.34/Benchmark.pm line 892
+# 	Benchmark::timethis(3, CODE(0x55aa85e2a990), "async", "") called at /usr/share/perl/5.34/Benchmark.pm line 958
+# 	Benchmark::timethese(3, HASH(0x55aa854d1578)) called at t/populator_speed_test.pl line 39
+# ';
+# Yote::RecordStore::Silo::put_record index 21 out of bounds for silo /tmp/jYvDQU4HgS/data_silos/14. Silo has entry count of 20 at lib/Yote/RecordStore/Silo.pm line 34.
+#
+        $self->_log( "$$ mark dead $old_id_in_silo/$old_silo_id" );
         $self->_mark( $old_silo_id, $old_id_in_silo, RS_DEAD );
     }
 
@@ -678,7 +718,10 @@ sub _fetch {
     my( $silo_id, $id_in_silo, $update_time, $creation_time ) = @{$self->[INDEX_SILO]->get_record($id)};
     if( $silo_id ) {
         my $ret = $self->[SILOS]->[$silo_id]->get_record( $id_in_silo );
-        return $update_time, $creation_time, substr( $ret->[3], 0, $ret->[2] );
+        my $val = substr( $ret->[3], 0, $ret->[2] );
+        my $data_read_size = do { use bytes; length $val };
+        $self->_log( "$$ FETCH \%$id at ($id_in_silo/$silo_id), ".length($data_read_size)." bytes" );
+        return $update_time, $creation_time, $val;
     }
     return undef;
 } #fetch
@@ -721,6 +764,8 @@ sub _vacuum {
 
 sub _vacate {
     my( $self, $silo_id, $id_to_empty ) = @_;
+
+    $self->_log( "$$ vacate $id_to_empty/$silo_id" );
 
     #
     # empty a data silo store entry.
@@ -771,14 +816,13 @@ sub _silo_id_for_size {
 } #_silo_id_for_size
 
 sub _open_silo {
-    my ($self, $silo_file, $template, $size, $max_file_size ) = @_;
+    my ($self, $silo_file, $template, %args ) = @_;
 
 
 
     return Yote::RecordStore::Silo->open_silo( $silo_file,
-                                                     $template,
-                                                     $size,
-                                                     $max_file_size );
+                                               $template,
+                                               %args );
 }
 
 
