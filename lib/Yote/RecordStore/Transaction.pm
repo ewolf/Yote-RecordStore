@@ -5,8 +5,8 @@ package Yote::RecordStore::Transaction;
 #      - remove die, replace with return values
 #      - enable testing
 
-use strict;
-use warnings;
+use 5.14.0;
+
 no warnings 'numeric';
 no warnings 'uninitialized';
 

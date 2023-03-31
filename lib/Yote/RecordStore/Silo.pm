@@ -1,7 +1,7 @@
 package Yote::RecordStore::Silo;
 
-use strict;
-use warnings;
+use 5.14.0;
+
 no warnings 'uninitialized';
 no warnings 'numeric';
 no strict 'refs';

@@ -63,9 +63,8 @@ including the locks that the store provides.
 
 =cut
 
-use v5.10;
-use strict;
-use warnings;
+use v5.14.0;
+
 no warnings 'numeric';
 no warnings 'uninitialized';
 
