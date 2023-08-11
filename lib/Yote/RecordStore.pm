@@ -132,14 +132,18 @@ sub open_store {
         }
     }
 
-    my $header = pack( 'ILL', 1,2,3 );
-    my $header_size = do { use bytes; length( $header ) };
-
     my $max_file_size = $Yote::RecordStore::Silo::DEFAULT_MAX_FILE_SIZE;
     my $min_file_size = $Yote::RecordStore::Silo::DEFAULT_MIN_FILE_SIZE;
 
     my $max_silo_id = _silo_id_for_size( $max_file_size, 0, 1 );
     my $min_silo_id = _silo_id_for_size( $min_file_size, 0, 1 );
+
+    $max_silo_id = int( log( $max_file_size ) / log( 2 ));
+    $max_silo_id++ if 2 ** $max_silo_id < $max_file_size; #provide a floor for rounding errors
+
+    $min_silo_id = int( log( $min_file_size ) / log( 2 ));
+    $min_silo_id++ if 2 ** $min_silo_id < $min_file_size; #provide a floor for rounding errors
+
 
     my $lockfile = "$dir/LOCK";
     my $lock_fh;
@@ -201,6 +205,9 @@ sub open_store {
         ); 
 
     my $silos = [];
+
+    my $header = pack( 'ILL', 1,2,3 );
+    my $header_size = do { use bytes; length( $header ) };
 
     for my $silo_id ($min_silo_id..$max_silo_id) {
         my $silo = $silos->[$silo_id] = $cls->_open_silo( "$silo_dir/$silo_id",
