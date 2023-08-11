@@ -132,12 +132,14 @@ sub open_store {
         }
     }
 
+    my $header = pack( 'ILL', 1,2,3 );
+    my $header_size = do { use bytes; length( $header ) };
+
     my $max_file_size = $Yote::RecordStore::Silo::DEFAULT_MAX_FILE_SIZE;
     my $min_file_size = $Yote::RecordStore::Silo::DEFAULT_MIN_FILE_SIZE;
 
-    my $max_silo_id = _silo_id_for_size_no_min( $max_file_size );
-
-    my $min_silo_id = _silo_id_for_size_no_min( $min_file_size );
+    my $max_silo_id = _silo_id_for_size( $max_file_size, 0, 1 );
+    my $min_silo_id = _silo_id_for_size( $min_file_size, 0, 1 );
 
     my $lockfile = "$dir/LOCK";
     my $lock_fh;
@@ -203,11 +205,8 @@ sub open_store {
     for my $silo_id ($min_silo_id..$max_silo_id) {
         my $silo = $silos->[$silo_id] = $cls->_open_silo( "$silo_dir/$silo_id",
                                                          'ILLa*',  # status, id, data-length, data
-                                                         size => _size_for_silo_id($silo_id) ); #size
+                                                         size => _size_for_silo_id($silo_id, $header_size) ); #size
     }
-
-    my $header = pack( 'ILL', 1,2,3 );
-    my $header_size = do { use bytes; length( $header ) };
 
     my $store = bless [
         $dir,                                   
@@ -665,7 +664,7 @@ sub _stow {
     }
 
     my $data_write_size = do { use bytes; length $data };
-    my $new_silo_id = $self->_silo_id_for_size( $data_write_size );
+    my $new_silo_id = _silo_id_for_size( $data_write_size, $self->[HEADER_SIZE], $self->[MIN_SILO_ID] );
     my $new_silo = $self->[SILOS][$new_silo_id];
 
     my $new_id_in_silo = $new_silo->push( [$rs_override || RS_ACTIVE, $id, $data_write_size, $data] );
@@ -803,28 +802,20 @@ sub _vacate {
 
 
 sub _size_for_silo_id {
-    my $id = shift;
+    my ($id, $header_size) = @_;
     2 ** $id;
 }
 
 sub _silo_id_for_size {
-    my( $self, $data_write_size ) = @_;
+    my( $data_write_size, $header_size, $min_silo_id ) = @_;
 
-    my $write_size = $self->[HEADER_SIZE] + $data_write_size;
+    my $write_size = $header_size + $data_write_size;
 
     my $silo_id = int( log( $write_size ) / log( 2 ) );
-    $silo_id++ if _size_for_silo_id($silo_id) < $write_size;
-    $silo_id = $self->[MIN_SILO_ID] if $silo_id < $self->[MIN_SILO_ID];
+    $silo_id++ if _size_for_silo_id($silo_id, $header_size) < $write_size;
+    $silo_id = $min_silo_id if $silo_id < $min_silo_id;
     return $silo_id;
 } #_silo_id_for_size
-
-sub _silo_id_for_size_no_min {
-    my $size = shift;
-    my $id = int( log( $size ) / log( 2 ));
-    $id++ if _size_for_silo_id( $id ) < $size; #provide a floor for rounding errors
-    $id;
-}
-
 
 sub _open_silo {
     my ($self, $silo_file, $template, %args ) = @_;
