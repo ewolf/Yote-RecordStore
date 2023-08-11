@@ -38,7 +38,9 @@ test_sillystrings();
 test_meta();
 test_vacate();
 test_misc();
-test_locking();
+for (1..20) {
+    test_locking();
+}
 
 done_testing;
 exit;
@@ -790,7 +792,6 @@ sub test_use {
     is ( $rs->active_entry_count, 3, "3 active items in silos after delete" );
 
     ok ($rs->lock, "got lock");
-use Scalar::Util qw(openhandle);
     is (flock( $rs->[Yote::RecordStore->LOCK_FH], LOCK_NB || LOCK_EX ), 0, 'unable to lock already locked fh' );
 
     ok ($rs->unlock, "unlock");
@@ -924,6 +925,7 @@ use Scalar::Util qw(openhandle);
             }
             my $exists = -e $file;
             open my ($fh), $exists ? '+<' : '>', $file;
+            $fh->blocking( 1 );
             unless ($exists) {
                 print $fh '';
             }
@@ -1507,12 +1509,12 @@ sub test_locking {
 
     my $A = fork;
     unless ( $A ) {
-        $forker->expect('start');
+        $forker->expect('start', 'A');
         my $store = Yote::RecordStore->open_store( $dir );
         $forker->put( 'A STORE' );
-        usleep (5000);
+        usleep (5000); # wait for b then c to act
 
-        $store->lock;
+        $store->lock; #FIRST LOCK
 
         $forker->put( 'A LOCKED' );
         usleep( 15000 );
@@ -1524,20 +1526,21 @@ sub test_locking {
 
     my $B = fork;
     unless( $B ) {
-        $forker->expect('start');
-        $forker->expect('A STORE', 'B');
+        $forker->expect('start', 'B');
+        $forker->expect('A STORE', 'B'); #waits for A to act
+
         my $store = Yote::RecordStore->open_store( $dir );
 
-        $forker->put('B STORE');
+        $forker->put('B STORE'); #acts
 
         $forker->spush('C STORE');
 
-        $forker->expect( 'A LOCKED' );
+        $forker->expect( 'A LOCKED', 'B' ); # waits on a to lock
 
-        $store->lock;
-
-        $forker->put ('B LOCKED');
-        usleep( 8000 );
+        $store->lock; # waits on a to unlock
+        usleep( 400); #wait for a to put A unlocked
+        $forker->put ('B LOCKED'); 
+        usleep( 8000 ); # waits on c to 
         $forker->put( "B TO UNLOCK" );
         $store->unlock;
         $forker->put( "B UNLOCKED" );
@@ -1546,20 +1549,20 @@ sub test_locking {
 
     my $C = fork;
     unless( $C ) {
-        $forker->expect('start' );
+        $forker->expect('start','C' ); 
         $forker->spush('A STORE');
-        $forker->expect( 'B STORE' );
+        $forker->expect( 'B STORE','C' ); #waits for a and b to act
         my $store = Yote::RecordStore->open_store( $dir );
 
-        $forker->put('C STORE');
+        $forker->put('C STORE'); #acts
 
         $forker->spush('A LOCKED', 
                        'A TO UNLOCK', 
                        'A UNLOCKED' );
-        $forker->expect('B LOCKED', 'C' );
+        $forker->expect('B LOCKED', 'C' ); # waits for b to lock
 
         $store->lock;
-
+        usleep( 400); #wait for b to put B unlocked
         $forker->put('C LOCKED');
 
         $forker->put( "C TO UNLOCK" );
@@ -1573,7 +1576,7 @@ sub test_locking {
     waitpid $A, 0;
     waitpid $B, 0;
     waitpid $C, 0;
-
+    
     is_deeply( $forker->get,
                [ 'start',
                  'A STORE',
@@ -1593,3 +1596,20 @@ sub test_locking {
 }
 
 __END__
+
+
+a, b, c waiting on start
+c  >gets start<, waits on B STORE
+b  >gets start<, waits on A STORE
+a  >gets start<, *puts A STORE*, naps
+b  >gets A STORE<, opens store, *puts B STORE*, waits on A LOCKED
+c  >gets B STORE<, opens store, *puts C STORE*, waits on B LOCKED
+a  >wakes up<, locks, *puts A LOCKED*, naps
+b  >gets A LOCKED<, waits for unlock
+a  >wakes up<, *puts A TO UNLOCK*, unlocks, ((*puts A UNLOCKED* maybe wrong timing here))
+b  >can lock<, locks, *puts B LOCKED*, naps
+c  >gets B LOCKED<, waits for unlock
+b  >wakes up<, *puts B TO UNLOCK*, unlocks, ((*puts B UNLOCKED))
+c  >can lock<, locks, *puts C LOCKED*, *puts C TO UNLOCK", unlocks, *puts C UNLOCKED*
+
+so out of order could be B LOCKED vs A UNLOCKED, and C LOCKED vs B UNLOCKED

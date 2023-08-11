@@ -21,6 +21,7 @@ sub new {
 sub init {
     my $self = shift;
     open my $out, ">", $self->{sema};
+    $out->blocking(1);
     print $out "";
     $self->{stack} = [];
 }
@@ -34,6 +35,7 @@ sub put {
     my( $self, $txt ) = @_;
     $self->spush( $txt );
     open my $out, ">>", $self->{sema} or die "$! $@";
+    $out->blocking(1);
     #print STDERR "FORKER PUT FLOCK $$\n";
     flock( $out, LOCK_EX );
     print $out "$txt\n";
@@ -46,6 +48,7 @@ sub get {
     my $self = shift;
     my $out = [];
     open my $in, '<', $self->{sema} or die "$! $@";
+    $in->blocking(1);
     #print STDERR "FORKER GET FLOCK $$\n";
     flock( $in, LOCK_SH );
     while( <$in> ) {
@@ -61,12 +64,12 @@ sub expect {
     my( $self, $what, $tag ) = @_;
     $self->spush( $what );
     while ( 1 ) {
-#say "$tag: ".join(",", @{$self->get()}). ' eq '. join(",", @{$self->{stack}} );
         my @got      = @{$self->get()};
+        my @expected = @{$self->{stack}};
+#say "$tag: ".join(",", @got). ' eq '. join(",", @expected);
         if (grep { $_ eq '__DEATH__' } @got) {
             exit;
         }
-        my @expected = @{$self->{stack}};
         if( join(",", @got) eq join(",", @expected) ) {
             return;
         }
