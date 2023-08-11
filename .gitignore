@@ -1,0 +1,16 @@
+*~
+data/
+data_5k_good/
+clojure-gru/
+all_articles.txt
+MANIFEST*
+_build
+blib
+bak
+cover_db
+experiments
+MYMETA*
+Build
+pop_data
+t/source_files
+t/temp_data

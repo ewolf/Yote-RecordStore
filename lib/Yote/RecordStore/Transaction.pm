@@ -17,14 +17,17 @@ use vars qw($VERSION);
 $VERSION = '0.01';
 
 use constant {
-    RS_ACTIVE    => 1,
-    RS_DEAD      => 2,
+    RS_ACTIVE         => 1,
+    RS_DEAD           => 2,
     RS_IN_TRANSACTION => 3,
 
     TR_ACTIVE         => 4,
     TR_IN_COMMIT      => 5,
     TR_IN_ROLLBACK    => 6,
     TR_COMPLETE       => 7,
+
+    MIN_SILO_ID       => 3,
+    HEADER_SIZE       => 8,    
 };
 
 #######################################################################
@@ -128,7 +131,7 @@ sub commit {
     $self->{state} = TR_IN_COMMIT;
 
     my $store_index = $store->index_silo;
-    my $store_silos = $store->silos;
+
     #
     # first update the index
     # 
@@ -137,12 +140,12 @@ sub commit {
         if ($action == RS_ACTIVE ) {
             # create or update
             $store_index->put_record( $rec_id, [$trans_silo_id,$trans_id_in_silo], 'IL' );
-            $store_silos->[$trans_silo_id]->put_record( $trans_id_in_silo, [ RS_ACTIVE ], 'I' );
+            $store->get_silo($trans_silo_id)->put_record( $trans_id_in_silo, [ RS_ACTIVE ], 'I' );
         }
         else {
             # remove
             $store_index->put_record( $rec_id, [0,0], 'IL' );
-            $store->silos->[$orig_silo_id]->put_record( $orig_id_in_silo, [RS_DEAD], 'I' );
+            $store->get_silo($orig_silo_id)->put_record( $orig_id_in_silo, [RS_DEAD], 'I' );
         }
     }
 
@@ -236,7 +239,7 @@ sub fetch {
     if (my $rec = $updates->{$id} ) {
         my ($action, $rec_id, $a, $b, $trans_silo_id, $trans_id_in_silo ) = @$rec;    
         if ($action == RS_ACTIVE ) {
-            my $ret = $store->silos->[$trans_silo_id]->get_record( $trans_id_in_silo );
+            my $ret = $store->get_silo($trans_silo_id)->get_record( $trans_id_in_silo );
             return substr( $ret->[3], 0, $ret->[2] );
         }
         return undef;
@@ -276,9 +279,9 @@ sub stow {
     }
 
     my $data_write_size = do { use bytes; length( $data ) };
-    my $trans_silo_id = $store->_silo_id_for_size( $data_write_size );
+    my $trans_silo_id = Yote::RecordStore::_silo_id_for_size( $data_write_size, $store->[HEADER_SIZE], $store->[MIN_SILO_ID] );
 
-    my $trans_silo = $store->silos->[$trans_silo_id];
+    my $trans_silo = $store->get_silo($trans_silo_id);
     my ($orig_silo_id, $orig_id_in_silo ) = @{$store->index_silo->get_record($id)};
     my $trans_id_in_silo = $trans_silo->push( [RS_IN_TRANSACTION, $id, $data_write_size, $data] );
     my $update = [RS_ACTIVE,$id,$orig_silo_id,$orig_id_in_silo,$trans_silo_id,$trans_id_in_silo];

@@ -115,6 +115,8 @@ use constant {
     TR_COMPLETE       => 7,
 };
 
+my $file_quanta = $Yote::RecordStore::Silo::DEFAULT_MIN_FILE_SIZE;
+my $quanta_boost = 4;
 
 =head2 open_store( directory )
 
@@ -123,7 +125,7 @@ Constructs a data store according to the options.
 =cut
 
 sub open_store {
-    my( $cls, $dir, %args ) = @_;
+    my( $pkg, $dir, %args ) = @_;
 
     unless( -d $dir ) {
         _make_path( $dir, \my $err, 'base' );
@@ -138,12 +140,7 @@ sub open_store {
     my $max_silo_id = _silo_id_for_size( $max_file_size, 0, 1 );
     my $min_silo_id = _silo_id_for_size( $min_file_size, 0, 1 );
 
-    $max_silo_id = int( log( $max_file_size ) / log( 2 ));
-    $max_silo_id++ if 2 ** $max_silo_id < $max_file_size; #provide a floor for rounding errors
-
-    $min_silo_id = int( log( $min_file_size ) / log( 2 ));
-    $min_silo_id++ if 2 ** $min_silo_id < $min_file_size; #provide a floor for rounding errors
-
+#print STDERR "SILOS FROM $min_silo_id ... $max_silo_id\n";
 
     my $lockfile = "$dir/LOCK";
     my $lock_fh;
@@ -192,13 +189,13 @@ sub open_store {
         _err( 'open_store', "unable to make silo directory.". join( ", ", map { $_->{$silo_dir} } @$err ) );
     }
 
-    my $index_silo = $cls->_open_silo( 
+    my $index_silo = $pkg->_open_silo(
         "$dir/index_silo",
         "ILQQ", #silo id, id in silo, last updated time, created time
         blocking => 1,
-        ); 
+        );
     
-    my $transaction_index_silo = $cls->_open_silo(
+    my $transaction_index_silo = $pkg->_open_silo(
         "$dir/transaction_index_silo",
         "IL", #state, trans id
         blocking => 1,
@@ -208,12 +205,6 @@ sub open_store {
 
     my $header = pack( 'ILL', 1,2,3 );
     my $header_size = do { use bytes; length( $header ) };
-
-    for my $silo_id ($min_silo_id..$max_silo_id) {
-        my $silo = $silos->[$silo_id] = $cls->_open_silo( "$silo_dir/$silo_id",
-                                                         'ILLa*',  # status, id, data-length, data
-                                                         size => _size_for_silo_id($silo_id, $header_size) ); #size
-    }
 
     my $store = bless [
         $dir,                                   
@@ -230,8 +221,9 @@ sub open_store {
         $max_silo_id,
         undef,
         {%args},
-    ], $cls;
+    ], $pkg;
 
+    $store->load_active_silos;
     $store->[IS_LOCKED] = 1;
 
     $store->_fix_transactions;
@@ -518,7 +510,7 @@ sub index_silo {
 
 =item silos
 
-returns array ref of all storage silos.
+returns array ref of all created storage silos.
 
 =cut
 sub silos {
@@ -601,7 +593,7 @@ record store in a particular directory.
 
 =cut
 sub detect_version {
-    my( $cls, $dir ) = @_;
+    my( $pkg, $dir ) = @_;
     my $ver_file = "$dir/VERSION";
     my $source_version;
     if ( -e $ver_file ) {
@@ -672,7 +664,8 @@ sub _stow {
 
     my $data_write_size = do { use bytes; length $data };
     my $new_silo_id = _silo_id_for_size( $data_write_size, $self->[HEADER_SIZE], $self->[MIN_SILO_ID] );
-    my $new_silo = $self->[SILOS][$new_silo_id];
+
+    my $new_silo = $self->get_silo($new_silo_id);
 
     my $new_id_in_silo = $new_silo->push( [$rs_override || RS_ACTIVE, $id, $data_write_size, $data] );
 
@@ -720,7 +713,7 @@ sub _fetch {
     }
     my( $silo_id, $id_in_silo, $update_time, $creation_time ) = @{$self->[INDEX_SILO]->get_record($id)};
     if( $silo_id ) {
-        my $ret = $self->[SILOS]->[$silo_id]->get_record( $id_in_silo );
+        my $ret = $self->get_silo($silo_id)->get_record( $id_in_silo );
         my $val = substr( $ret->[3], 0, $ret->[2] );
         my $data_read_size = do { use bytes; length $val };
         $self->_log( "$$ FETCH \%$id at ($id_in_silo/$silo_id), ".length($data_read_size)." bytes" );
@@ -735,7 +728,7 @@ sub _openhandle {
 
 sub _mark {
     my ($self, $silo_id, $id_in_silo, $rs ) = @_;
-    $self->[SILOS][$silo_id]->put_record( $id_in_silo, [ $rs ], 'I' );
+    $self->get_silo($silo_id)->put_record( $id_in_silo, [ $rs ], 'I' );
 }
 
 sub _time {
@@ -779,7 +772,7 @@ sub _vacate {
     #            entries as you go
     #
 
-    my $silo = $self->[SILOS][$silo_id];
+    my $silo = $self->get_silo($silo_id);
     my $rc = $silo->entry_count;
 
     if( $id_to_empty == $rc ) {
@@ -807,34 +800,55 @@ sub _vacate {
     return 1;
 } #_vacate
 
-
 sub _size_for_silo_id {
-    my ($id, $header_size) = @_;
-    2 ** $id;
+    my ($silo_id) = @_;
+    int ($file_quanta * $quanta_boost * $silo_id);
 }
 
 sub _silo_id_for_size {
     my( $data_write_size, $header_size, $min_silo_id ) = @_;
-
+    
     my $write_size = $header_size + $data_write_size;
-
-    my $silo_id = int( log( $write_size ) / log( 2 ) );
-    $silo_id++ if _size_for_silo_id($silo_id, $header_size) < $write_size;
+    
+    my $silo_id = int($write_size / ($file_quanta*$quanta_boost));
+#    print STDERR "$silo_id for $write_size < "._size_for_silo_id( $silo_id )."\n";
+    $silo_id++ if _size_for_silo_id($silo_id) < $write_size;
     $silo_id = $min_silo_id if $silo_id < $min_silo_id;
     return $silo_id;
 } #_silo_id_for_size
 
+sub load_active_silos {
+    my $self = shift;
+    my $dir = "$self->[DIRECTORY]/data_silos/";
+    # scan dir and open silos that correspond
+    opendir my $dh, $dir;
+    no warnings 'numeric';
+    map { $self->get_silo( $_ ) }
+       grep {$_>0} 
+       map { s!.*/(\d+)$!\1!; $_ } 
+       readdir($dh);
+}
+
+sub get_silo {
+    my ($self, $silo_id) = @_;
+    my $silos = $self->[SILOS];
+    my $silo = $silos->[$silo_id];
+    if (!$silo) {
+        $silo = $silos->[$silo_id] =
+            $self->_open_silo( "$self->[DIRECTORY]/data_silos/$silo_id",
+                               'ILLa*',
+                               size => _size_for_silo_id( $silo_id ) );
+    }
+    return $silo;
+}
+
+# for testing monkeypatching
 sub _open_silo {
     my ($self, $silo_file, $template, %args ) = @_;
-
-
-
     return Yote::RecordStore::Silo->open_silo( $silo_file,
                                                $template,
                                                %args );
 }
-
-
 
 sub _make_path {
     my( $dir, $err, $msg ) = @_;

@@ -22,6 +22,8 @@ use Time::HiRes qw(usleep);
 
 
 use Carp;
+
+my $BIGSIZE = 20_000;
 #$SIG{ __DIE__ } = sub { Carp::confess( @_ ) };
 
 my $is_root = `whoami` =~ /root/;
@@ -102,7 +104,7 @@ sub test_vacate {
 
     my $rs = Yote::RecordStore->open_store( $dir );
 
-    my $silo = $rs->silos->[12];
+    my $silo = $rs->get_silo(1);
     is ($silo->entry_count, 0, 'silo starts off empty' );
 
     locks ($rs);
@@ -162,7 +164,7 @@ sub test_vacate {
 
         $store->[$store->TRANSACTION] = undef;
 
-        my $silo = $store->silos->[12];
+        my $silo = $store->get_silo(1);
 
         # now it should be at a state like so:
         is_deeply( get_rec(1, $silo), [$rs->RS_ACTIVE,1,1,'A'], 'rec 1' );
@@ -192,7 +194,7 @@ sub test_vacate {
         ok ($store->commit_transaction, 'could commit trans' );
         is ($store->transaction_silo->entry_count, 0, 'no entries in trans silo post commit' );
 
-        my $silo = $store->silos->[12];
+        my $silo = $store->get_silo(1);
 
         # now it should be at a state like so:
         is_deeply( get_rec(1, $silo), [$rs->RS_ACTIVE,1,1,'A'], 'rec 1' );
@@ -206,7 +208,7 @@ sub test_vacate {
             die 'monkey wrench';
         };
 
-        failnice (sub {$store->_vacate( 12, 2 )},
+        failnice (sub {$store->_vacate( 1, 2 )},
                   'monkey wrench',
                   'vacate failed because of entries in transaction');
         is ($silo->entry_count, 4, 'still 4 silo entries' );
@@ -220,12 +222,12 @@ sub test_vacate {
 
         my $store = Yote::RecordStore->open_store( $dir );
 
-        my $silo = $store->silos->[12];
-        my $bsilo = $store->silos->[13];
+        my $silo = $store->get_silo(1);
+        my $bsilo = $store->get_silo(2);
         my $isilo = $store->index_silo;
         my $tsilo = $store->transaction_silo;
 
-        my $large = "X" x 7_000;
+        my $large = big("X");
         {
             locks ($store);
 
@@ -257,29 +259,29 @@ sub test_vacate {
             # check the state, shoud have one competed transaction
             is ( $bsilo->entry_count, 1, 'only one thing in big silo' );
             is ( $silo->entry_count, 1, 'only one uncleaned up thing in silo' );
-            is_deeply( get_rec(1, $bsilo), [$rs->RS_ACTIVE,1,7_000,$large], 'rec 1' );
-            is_deeply( get_rec(1, $silo), [$rs->RS_DEAD,2, 24, pack ("IIIIII", $store->RS_ACTIVE,1,0,0,13,1 )], 'dead trans obj' );
+            is_deeply( get_rec(1, $bsilo), [$rs->RS_ACTIVE,1,$BIGSIZE,$large], 'rec 1' );
+            is_deeply( get_rec(1, $silo), [$rs->RS_DEAD,2, 24, pack ("IIIIII", $store->RS_ACTIVE,1,0,0,2,1 )], 'dead trans obj' );
 
         }
 
         $store = Yote::RecordStore->open_store( $dir );
-        is_deeply( get_rec(1, $bsilo), [$rs->RS_ACTIVE,1,7_000,$large], 'rec 1' );
-        $silo = $store->silos->[12];
-        $bsilo = $store->silos->[13];
+        is_deeply( get_rec(1, $bsilo), [$rs->RS_ACTIVE,1,$BIGSIZE,$large], 'rec 1' );
+        $silo = $store->get_silo(1);
+        $bsilo = $store->get_silo(2);
         $isilo = $store->index_silo;
         $tsilo = $store->transaction_silo;
 
         is ( $bsilo->entry_count, 1, 'only one thing in big silo' );
         is ( $silo->entry_count, 0, 'things cleaned up in silo' );
 
-        is_deeply( get_rec(1, $bsilo), [$rs->RS_ACTIVE,1,7_000,$large], 'rec 1' );
+        is_deeply( get_rec(1, $bsilo), [$rs->RS_ACTIVE,1,$BIGSIZE,$large], 'rec 1' );
     }
 
 }
 
 sub big {
     my $str = shift;
-    return  $str x 7_000;
+    return  $str x $BIGSIZE;
 }
 
 sub test_cleanup {
@@ -290,8 +292,8 @@ sub test_cleanup {
     
         my $rs = Yote::RecordStore->open_store( $dir );
 
-        my $silo = $rs->silos->[12];
-        my $bsilo = $rs->silos->[13];
+        my $silo = $rs->get_silo(1);
+        my $bsilo = $rs->get_silo(2);
         my $isilo = $rs->index_silo;
         my $tsilo = $rs->transaction_silo;
 
@@ -307,7 +309,7 @@ sub test_cleanup {
         
         my $sis = sub {
             my( $sid, $id, $stat, $val ) = @_;
-            is_deeply( get_rec($sid, $silo), [$stat,$id,length($val),$val], "rec $val $id - 12/$sid" );
+            is_deeply( get_rec($sid, $silo), [$stat,$id,length($val),$val], "rec $val $id - 1/$sid" );
         };
         $sis->( 1, 1, $rs->RS_ACTIVE, "AA" );
         $sis->( 2, 2, $rs->RS_ACTIVE, "BB" );
@@ -329,8 +331,8 @@ sub test_cleanup {
     
         my $rs = Yote::RecordStore->open_store( $dir );
 
-        my $silo = $rs->silos->[12];
-        my $bsilo = $rs->silos->[13];
+        my $silo = $rs->get_silo(1);
+        my $bsilo = $rs->get_silo(2);
         my $isilo = $rs->index_silo;
         my $tsilo = $rs->transaction_silo;
 
@@ -349,7 +351,7 @@ sub test_cleanup {
         
         my $sis = sub {
             my( $sid, $id, $stat, $val ) = @_;
-            is_deeply( get_rec($sid, $silo), [$stat,$id,length($val),$val], "rec $val $id - 12/$sid" );
+            is_deeply( get_rec($sid, $silo), [$stat,$id,length($val),$val], "rec $val $id - 1/$sid" );
         };
         $sis->( 1, 1, $rs->RS_ACTIVE, "AA" );
         $sis->( 2, 2, $rs->RS_ACTIVE, "BB" );
@@ -371,8 +373,8 @@ sub test_cleanup {
         # after that
         my $rs = Yote::RecordStore->open_store( $dir );
 
-        my $silo = $rs->silos->[12];
-        my $bsilo = $rs->silos->[13];
+        my $silo = $rs->get_silo(1);
+        my $bsilo = $rs->get_silo(2);
         my $isilo = $rs->index_silo;
         my $tsilo = $rs->transaction_silo;
 
@@ -395,7 +397,7 @@ sub test_cleanup {
         
         my $sis = sub {
             my( $sid, $id, $stat, $val ) = @_;
-            is_deeply( get_rec($sid, $silo), [$stat,$id,length($val),$val], "rec $val $id - 12/$sid" );
+            is_deeply( get_rec($sid, $silo), [$stat,$id,length($val),$val], "rec $val $id - 1/$sid" );
         };
         my $bis = sub {
             my( $sid, $id, $stat, $val ) = @_;
@@ -474,8 +476,8 @@ sub test_cleanup {
         }
         
         is( $x->[0], $rs->RS_DEAD );
-        is_deeply( [@$a,@$b], [$rs->RS_ACTIVE,7,0,0,12,7,
-                               $rs->RS_ACTIVE,2,0,0,13,6], 
+        is_deeply( [@$a,@$b], [$rs->RS_ACTIVE,7,0,0,1,7,
+                               $rs->RS_ACTIVE,2,0,0,2,6], 
                    "correctly packed commit" );
 
         is ($bsilo->entry_count, 6, '6 in large silo' );
@@ -526,16 +528,14 @@ sub test_init {
     ok( $rs, 'inited store' );
     is ($rs->directory, $dir, "recordstore directory" );
 
-    is ( $rs->[Yote::RecordStore->MIN_SILO_ID], 12, "default min silo id" );
-    is ( $rs->[Yote::RecordStore->MAX_SILO_ID], 31, "default max silo id" );
+    is ( $rs->[Yote::RecordStore->MIN_SILO_ID], 1, "default min silo id" );
+    is ( $rs->[Yote::RecordStore->MAX_SILO_ID], 122_071, "default max silo id" );
 
     my $silos = $rs->silos;
-    is ( @$silos - $rs->[Yote::RecordStore->MIN_SILO_ID], 1 + (31 - 12), '20 silos' );
     $rs->[$rs->LOCK_FH] = undef;
 
     $rs = Yote::RecordStore->open_store( $dir );
     ok( $rs, 'reopen store right stuff' );
-    is ( @$silos - $rs->[Yote::RecordStore->MIN_SILO_ID], 1 + (31 - 12), 'still 20 silos' );
 
     $dir = tempdir( CLEANUP => 1 );
     $rs = Yote::RecordStore->open_store( "$dir/NOODIR" );
@@ -549,26 +549,24 @@ sub test_init {
         local $Yote::RecordStore::Silo::DEFAULT_MIN_FILE_SIZE = 300;
         $rs = Yote::RecordStore->open_store( $dir );
         ok( $rs, 'reinit store right stuff' );
-        is ( $rs->[Yote::RecordStore->MIN_SILO_ID], 9, "min silo id for 300 min size" );
-        is ( @$silos - $rs->[Yote::RecordStore->MIN_SILO_ID], 1 + (31 - 9), 'number of silos' );
-    }
+        is ( $rs->[Yote::RecordStore->MIN_SILO_ID], 1, "min silo id for sizes 300 -> 3_000_000_000" );
+        is ( $rs->[Yote::RecordStore->MAX_SILO_ID], 183106, "max silo id for sizes 300 -> 3_000_000_000" );
+   }
 
     {
         local $Yote::RecordStore::Silo::DEFAULT_MAX_FILE_SIZE = 2 ** 12;
         $dir = tempdir( CLEANUP => 1 );
         $rs = Yote::RecordStore->open_store( $dir );
-        $silos = $rs->silos;
-        is ( @$silos - $rs->[Yote::RecordStore->MIN_SILO_ID], 13 - 12, '1 silo' );
+        is ( $rs->[Yote::RecordStore->MIN_SILO_ID], 1, "max silo id for 4096 max size" );
+        is ( $rs->[Yote::RecordStore->MAX_SILO_ID], 1, "max silo id for 4096 max size" );
     }
 
     {
         local $Yote::RecordStore::Silo::DEFAULT_MIN_FILE_SIZE = 2 ** 10;
         $dir = tempdir( CLEANUP => 1 );
         $rs = Yote::RecordStore->open_store($dir);
-        is ( $rs->[Yote::RecordStore->MIN_SILO_ID], 10, 'min silo id is 10' );
-        is ( $rs->[Yote::RecordStore->MAX_SILO_ID], 31, 'max silo id is 31' );
-        $silos = $rs->silos;
-        is ( $#$silos - $rs->[Yote::RecordStore->MIN_SILO_ID], 31 - 10, '21 silos' );
+        is ( $rs->[Yote::RecordStore->MIN_SILO_ID], 1, 'min silo id for 1024 min size' );
+        is ( $rs->[Yote::RecordStore->MAX_SILO_ID], 122_071, 'max silo id for 1024 min size' );
     }
 
     # if( ! $is_root ) {
@@ -617,8 +615,8 @@ sub test_init {
         $rs = Yote::RecordStore->open_store( $dir );
 
         ok( $rs, 'opened a record store' );
-        $silos = $rs->silos;
-        is ( @$silos - $rs->[Yote::RecordStore->MIN_SILO_ID], 13 - 12, 'opened with correct number of silos' );
+        is ( $rs->[Yote::RecordStore->MIN_SILO_ID], 1, "min silo id for 4096 max size" );
+        is ( $rs->[Yote::RecordStore->MAX_SILO_ID], 1, "max silo id for 4096 max size" );
     }
 
 } #test_init
@@ -758,7 +756,7 @@ sub test_use {
     is ( $rs->active_entry_count, 6, "6 active items in silos" );
 
 
-    my $silo = $rs->silos->[12];
+    my $silo = $rs->get_silo(1);
 
     is_deeply( get_rec(1, $silo), [$rs->RS_ACTIVE,1,5,'ZIPPO'], 'rec 1' );
     is_deeply( get_rec(2, $silo), [$rs->RS_ACTIVE,2,5,'BLINK'], 'rec 2' );
@@ -827,9 +825,9 @@ sub test_use {
                 die "monkeypatch $breakon";
             }
             return Yote::RecordStore::Silo->open_silo( $silo_file,
-                                                             $template,
-                                                             $size,
-                                                             $max_file_size );
+                                                       $template,
+                                                       $size,
+                                                       $max_file_size );
         };
 
         failnice (sub{Yote::RecordStore->open_store($dir)}, 'monkeypatch index_silo', 'no index silo' );
@@ -837,8 +835,8 @@ sub test_use {
         $breakon = 'transaction_index_silo';
         failnice (sub {Yote::RecordStore->open_store($dir)}, 'monkeypatch transaction_index_silo', 'no transaction index silo' );
 
-        $breakon = '12';
-        failnice (sub {Yote::RecordStore->open_store($dir)}, 'monkeypatch 12', 'no data silo' );
+        $breakon = '1';
+        failnice (sub {my $s = Yote::RecordStore->open_store($dir);$s->stow( "WO" )}, 'monkeypatch 1', 'no data silo' );
     }
 
 
@@ -1122,7 +1120,7 @@ sub test_transactions {
         $store->delete_record( 2 );
         $store->delete_record( 3 );
 
-        my $silo = $store->silos->[12];
+        my $silo = $store->get_silo(1);
         {
             # have vacate throw an exception, leaving things
             # in a state where records are marked as RS_DEAD
@@ -1138,6 +1136,7 @@ sub test_transactions {
             };
 
             # verify silo is as expected
+            # record is [ status, id, write_size, data ]
             is_deeply( get_rec(1, $silo), [$rs->RS_ACTIVE,1,1,'A'], 'rec 1' );
             is_deeply( get_rec(2, $silo), [$rs->RS_DEAD,2,1,'B'], 'rec 2' );
             is_deeply( get_rec(3, $silo), [$rs->RS_DEAD,3,1,'C'], 'rec 3' );
@@ -1150,7 +1149,7 @@ sub test_transactions {
         }
 
         # now run the vacate manually. It should clear the last away and move record F
-        is ($store->_vacate( 12, 2 ), 1, 'vacate worked');
+        is ($store->_vacate( 1, 2 ), 1, 'vacate worked');
         is_deeply( get_rec(1, $silo), [$rs->RS_ACTIVE,1,1,'A'], 'rec 1' );
         is_deeply( get_rec(2, $silo), [$rs->RS_ACTIVE,6,1,'F'], 'rec 6' );
         is_deeply( get_rec(3, $silo), [$rs->RS_DEAD,3,1,'C'], 'rec 3' );
@@ -1170,7 +1169,7 @@ sub test_transactions {
         my $tsilo = $store->transaction_silo;
         is ($tsilo->entry_count, 0, 'no entries in trans silo');
 
-        my $silo = $store->silos->[12];
+        my $silo = $store->get_silo(1);
         is ($silo->entry_count, 0, 'no entries in silo');
 
         is ($store->stow( "A" ), 1, "first id");
@@ -1214,7 +1213,7 @@ sub test_transactions {
 
         my $rs = Yote::RecordStore->open_store( $dir );
 
-        my $silo = $rs->silos->[12];
+        my $silo = $rs->get_silo(1);
         is ($silo->entry_count, 0, 'silo starts off empty' );
 
         locks ($rs);
@@ -1262,7 +1261,7 @@ sub test_transactions {
         my $tsilo = $store->transaction_silo;
         is ($tsilo->entry_count, 0, 'no entries in trans silo');
 
-        my $silo = $store->silos->[12];
+        my $silo = $store->get_silo(1);
         is ($silo->entry_count, 0, 'no entries in silo');
 
         is ($store->stow( "A" ), 1, "first id");
@@ -1299,7 +1298,7 @@ sub test_transactions {
     {
         $dir = tempdir( CLEANUP => 1 );
         my $store = Yote::RecordStore->open_store( $dir );
-        my $silo = $store->silos->[12];
+        my $silo = $store->get_silo(1);
         my $isilo = $store->index_silo;
 
         locks ($store);
@@ -1338,7 +1337,7 @@ sub test_transactions {
     {
         $dir = tempdir( CLEANUP => 1 );
         my $store = Yote::RecordStore->open_store( $dir );
-        my $silo = $store->silos->[12];
+        my $silo = $store->get_silo(1);
         my $tsilo = $store->transaction_silo;
         my $isilo = $store->index_silo;
         locks ($store);
@@ -1360,7 +1359,7 @@ sub test_transactions {
 
             $store->use_transaction;
 
-            $failid = [12,1];
+            $failid = [1,1];
 
             $store->stow( "AOOU" );
 
@@ -1376,7 +1375,7 @@ sub test_transactions {
             is ($isilo->entry_count, 2, '2 rec in index silo now, dead record and transaction' );
 
             is_deeply( get_rec( 1, $isilo, 2), [ 0, 0 ], 'index rec is unchanged' );
-            is_deeply( get_rec( 2, $isilo, 2), [ 12, 2 ], 'index rec is unchanged' );
+            is_deeply( get_rec( 2, $isilo, 2), [ 1, 2 ], 'index rec is unchanged' );
 
             is ($tsilo->entry_count, 1, 'one transaction');
             is_deeply( get_rec( 1, $tsilo), [ $store->TR_IN_COMMIT, 2 ], 'state of transaction silo' );
@@ -1389,8 +1388,8 @@ sub test_transactions {
             is_deeply( get_rec( 1, $silo), [ $store->RS_DEAD, 1, 4, 'AOOU' ], 'index rec is unchanged' );
             my $x = get_rec( 2, $silo);
             is_deeply( get_rec( 2, $silo, 3), [ $store->RS_DEAD, 2, 24 ], 'transaction object not yet cleared out' );
-            is_deeply( [unpack( "IIIIII", $x->[3])], [$store->RS_ACTIVE,1,0,0,12,1], 'transaction object values' );
-            is_deeply( get_rec( 2, $silo), [ $store->RS_DEAD, 2, 24, pack ("IIIIII", $store->RS_ACTIVE,1,0,0,12,1 ) ], 'transaction object not yet cleared out' );
+            is_deeply( [unpack( "IIIIII", $x->[3])], [$store->RS_ACTIVE,1,0,0,1,1], 'transaction object values' );
+            is_deeply( get_rec( 2, $silo), [ $store->RS_DEAD, 2, 24, pack ("IIIIII", $store->RS_ACTIVE,1,0,0,1,1 ) ], 'transaction object not yet cleared out' );
 
             $store->_vacuum;
             is ($silo->entry_count, 0, '2 entries cleaned up');
@@ -1403,8 +1402,8 @@ sub test_transactions {
         $dir = tempdir( CLEANUP => 1 );
         my $store = Yote::RecordStore->open_store( $dir );
         locks ($store);
-        my $silo = $store->silos->[12];
-        my $bigsilo = $store->silos->[13];
+        my $silo = $store->get_silo(1);
+        my $bigsilo = $store->get_silo(2);
 
         $store->stow( "OOGA" );
         $store->use_transaction;
@@ -1430,11 +1429,11 @@ sub test_transactions {
         $dir = tempdir( CLEANUP => 1 );
         my $store = Yote::RecordStore->open_store( $dir );
         locks ($store);
-        my $silo = $store->silos->[12];
-        my $bigsilo = $store->silos->[13];
+        my $silo = $store->get_silo(1);
+        my $bigsilo = $store->get_silo(2);
 
         $store->stow( "OOGA" );
-        my $large = "X" x 7_000;
+        my $large = big("X");
         $store->stow( $large );
         is ($bigsilo->entry_count, 1, '1 big thing' );
         
@@ -1538,7 +1537,7 @@ sub test_locking {
         $forker->expect( 'A LOCKED', 'B' ); # waits on a to lock
 
         $store->lock; # waits on a to unlock
-        usleep( 400); #wait for a to put A unlocked
+        usleep( 1000 ); #wait for a to put A unlocked
         $forker->put ('B LOCKED'); 
         usleep( 8000 ); # waits on c to 
         $forker->put( "B TO UNLOCK" );
@@ -1562,7 +1561,7 @@ sub test_locking {
         $forker->expect('B LOCKED', 'C' ); # waits for b to lock
 
         $store->lock;
-        usleep( 400); #wait for b to put B unlocked
+        usleep(800); #wait for b to put B unlocked
         $forker->put('C LOCKED');
 
         $forker->put( "C TO UNLOCK" );
