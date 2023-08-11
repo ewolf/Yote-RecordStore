@@ -821,11 +821,11 @@ sub load_active_silos {
     my $self = shift;
     my $dir = "$self->[DIRECTORY]/data_silos/";
     # scan dir and open silos that correspond
-    opendir my $dh, $dir;
+    opendir( my $dh, $dir );
     no warnings 'numeric';
     map { $self->get_silo( $_ ) }
        grep {$_>0} 
-       map { s!.*/(\d+)$!\1!; $_ } 
+       map { s!.*/(\d+)$!$1!; $_ } 
        readdir($dh);
 }
 
