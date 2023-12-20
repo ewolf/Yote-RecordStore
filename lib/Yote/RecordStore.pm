@@ -240,7 +240,7 @@ sub lock {
     my $self = shift;
     my $ret = $self->[LOCKER]->lock;
     $ret && $self->_reset;
-    $ret;
+    return $ret;
 }
 
 =item unlock

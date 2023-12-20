@@ -791,7 +791,8 @@ sub test_use {
     is ( $rs->active_entry_count, 3, "3 active items in silos after delete" );
 
     ok ($rs->lock, "got lock");
-    is (flock( $rs->[Yote::RecordStore->LOCK_FH], LOCK_NB || LOCK_EX ), 0, 'unable to lock already locked fh' );
+    is (flock( $rs->[$rs->LOCKER][$rs->[$rs->LOCKER]->LOCK_FH]
+               , LOCK_NB || LOCK_EX ), 0, 'unable to lock already locked fh' );
 
     ok ($rs->unlock, "unlock");
 
@@ -846,21 +847,20 @@ sub test_use {
 
         no strict 'refs';
         no warnings 'redefine';
-        local *Yote::RecordStore::_openhandle = sub {
+        local *Yote::Locker::_openhandle = sub {
             warn "monkeypatch _openhandle";
             return undef;
         };
-
         warnnice (sub{$rs->lock}, 1, 'monkeypatch _openhandle', "got lock with filehandle closed");
-        is (flock( $rs->[Yote::RecordStore->LOCK_FH], LOCK_NB || LOCK_EX ), 0, 'unable to lock already locked fh filehandle closed' );
+        is (flock( $rs->[$rs->LOCKER][$rs->[$rs->LOCKER]->LOCK_FH], LOCK_NB || LOCK_EX ), 0, 'unable to lock already locked fh filehandle closed' );
         ok ($rs->unlock, "unlock filehandle");
         unlink "$dir/LOCK";
         warnnice( sub{$rs->lock}, 1, 'monkeypatch _openhandle', "got lock with filehandle closed and lockfile removed");
 
         ok (-e "$dir/LOCK", "lock file regenerated");
-        is (flock( $rs->[Yote::RecordStore->LOCK_FH], LOCK_NB || LOCK_EX ), 0, 'unable to lock already locked fh filehandle closed' );
+        is (flock( $rs->[$rs->LOCKER][$rs->[$rs->LOCKER]->LOCK_FH], LOCK_NB || LOCK_EX ), 0, 'unable to lock already locked fh filehandle closed' );
         ok ($rs->unlock, "unlock filehandle");
-        local *Yote::RecordStore::_open = sub {
+        local *Yote::Locker::_open = sub {
             $@ = 'monkeypatch _open ';
             return 0;
         };
@@ -875,7 +875,7 @@ sub test_use {
         no strict 'refs';
         no warnings 'redefine';
         my $fail = 1;
-        local *Yote::RecordStore::_flock = sub {
+        local *Yote::Locker::_flock = sub {
             my ($fh, $flags) = @_;
             if (++$fail) {
                 $@ = "monkeypatch flock";
@@ -916,7 +916,7 @@ sub test_use {
         my $old_open = *CORE::open;
         no strict 'refs';
         no warnings 'redefine';
-        local *Yote::RecordStore::_open = sub {
+        local *Yote::Locker::_open = sub {
             my ($file) = @_;
             if ($file =~ /LOCK$/) {
                 $@ = 'monkeypatch';
@@ -1041,8 +1041,8 @@ sub test_transactions {
               'may not unlock with a pending',
               'cant unlock store with active transaction' );
 
-    close $rs->[$rs->LOCK_FH];
-    $rs->[$rs->IS_LOCKED] = 0;
+    close $rs->[$rs->LOCKER][$rs->[$rs->LOCKER]->LOCK_FH];
+    $rs->[$rs->LOCKER][$rs->[$rs->LOCKER]->IS_LOCKED] = 0;
 
     # see that there is one transaction that needs fixing
     my $trans_silo = $copy->transaction_silo;
@@ -1193,7 +1193,9 @@ sub test_transactions {
         #
         # pretend store is locked to be able to fetch things
         #
-        $store->[$store->IS_LOCKED] = 1;
+        my $locker = $store->[$store->LOCKER];
+        $locker->[$locker->IS_LOCKED] = 1;
+        ok ($locker->is_locked, 'locker now thinks it is locked');
         is ($silo->entry_count, 4, 'still 4 entries in silo');
 
         is ($store->fetch(1), 'A', 'first fe' );

@@ -26,8 +26,8 @@ use constant {
     TR_IN_ROLLBACK    => 6,
     TR_COMPLETE       => 7,
 
-    MIN_SILO_ID       => 3,
-    HEADER_SIZE       => 8,    
+    MIN_SILO_ID       => 2,
+    HEADER_SIZE       => 7,    
 };
 
 #######################################################################
