@@ -77,28 +77,6 @@ sub noSTDERR {
     $subr->();
 }
 
-
-sub get_rec {
-    my( $id, $silo, $limit) = @_;
-    my $res = $silo->get_record($id);
-    if (@$res > 3) {
-        $res->[3] = substr( $res->[3], 0, $res->[2] );
-    }
-    if ($limit) {
-        $res = [@$res[0..($limit-1)]];
-    }
-    $res;
-}
-
-sub test_misc {
-    my $dir = tempdir( CLEANUP => 1 );
-    chmod 0444, $dir;
-    is (Yote::RecordStore::_open( "$dir/foo", '>>' ), undef,
-        'open write only file' );
-    chmod 0666, $dir;
-}
-
-
 sub big {
     my $str = shift;
     return  $str x $BIGSIZE;

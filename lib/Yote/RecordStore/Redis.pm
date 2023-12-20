@@ -24,10 +24,10 @@ sub open_store {
 
     my $redis = Redis->new(
         server => $args{redis_ip} || '127.0.0.1:6379',
-        name   => "RecordStore: $name",
+        name   => "recordstore-$name-",
         );
 
-    my $idkey = "${name}:__LASTID__";
+    my $idkey = "${name}__LASTID__";
 
     my $store = bless [
         $name,
@@ -107,13 +107,11 @@ sub stow {
         $id = $self->next_id;
     }
 
-    $id = "$self->[NAME]:$id";
-
 #    print STDERR "STOW $id --> ".length($data)." bytes\n";
 
 #print STDERR Data::Dumper->Dump([$data,$id,"STOW"]);
 
-    $self->[REDIS]->set( $id, $data );
+    $self->[REDIS]->hset( "$self->[NAME]DATA", $id, $data );
 }
 
 sub fetch {
@@ -121,8 +119,7 @@ sub fetch {
     unless ($self->is_locked) {
         _err( 'fetch', "record store not locked");
     }
-    $id = "$self->[NAME]:$id";
-    my $val = $self->[REDIS]->get( $id );
+    my $val = $self->[REDIS]->hget( "$self->[NAME]DATA", $id );
 #    print STDERR "FETCH $id --> ".length($val)." bytes\n";
 #    print STDERR Data::Dumper->Dump([$val,$id,"FETCH"]);
     return 0, 0, $val;
