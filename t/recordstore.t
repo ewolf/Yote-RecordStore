@@ -4,6 +4,7 @@ use warnings;
 no warnings 'uninitialized';
 
 use lib 't/lib';
+use lib './t/lib';
 use forker;
 
 use Data::Dumper;
@@ -532,7 +533,7 @@ sub test_init {
     is ( $rs->[Yote::RecordStore->MAX_SILO_ID], 122_071, "default max silo id" );
 
     my $silos = $rs->silos;
-    $rs->[$rs->LOCK_FH] = undef;
+    $rs->[$rs->LOCKER][$rs->[$rs->LOCKER]->LOCK_FH] = undef;
 
     $rs = Yote::RecordStore->open_store( $dir );
     ok( $rs, 'reopen store right stuff' );

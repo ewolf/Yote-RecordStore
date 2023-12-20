@@ -63,18 +63,17 @@ including the locks that the store provides.
 
 =cut
 
-use v5.14.0;
+use v5.16.0;
 
 no warnings 'numeric';
 no warnings 'uninitialized';
 
 use Carp 'longmess';
 use Data::Dumper;
-use Fcntl qw( :flock SEEK_SET );
 use File::Path qw(make_path);
-use Scalar::Util qw(openhandle);
 use Time::HiRes qw(time);
 
+use Yote::Locker;
 use Yote::RecordStore::Silo;
 use Yote::RecordStore::Transaction;
 
@@ -90,18 +89,16 @@ use constant {
     # its components
     DIRECTORY              => 0,
 
-    MAX_FILE_SIZE          => 2,
-    MIN_SILO_ID            => 3,
-    INDEX_SILO             => 4,
-    SILOS                  => 5,
-    TRANSACTION_INDEX_SILO => 6,
-    TRANSACTION            => 7,
-    HEADER_SIZE            => 8,
-    LOCK_FH                => 9,
-    LOCK_FILE              => 10,
-    MAX_SILO_ID            => 11,
-    IS_LOCKED              => 12,
-    ARGS                   => 13,
+    MAX_FILE_SIZE          => 1,
+    MIN_SILO_ID            => 2,
+    INDEX_SILO             => 3,
+    SILOS                  => 4,
+    TRANSACTION_INDEX_SILO => 5,
+    TRANSACTION            => 6,
+    HEADER_SIZE            => 7,
+    MAX_SILO_ID            => 8,
+    LOCKER                 => 9,
+    ARGS                   => 10,
 
     # record state
     RS_ACTIVE         => 1,
@@ -141,31 +138,17 @@ sub open_store {
     my $min_silo_id = _silo_id_for_size( $min_file_size, 0, 1 );
 
 #print STDERR "SILOS FROM $min_silo_id ... $max_silo_id\n";
-
-    my $lockfile = "$dir/LOCK";
-    my $lock_fh;
-
     my $silo_dir  = "$dir/data_silos";
 
-    # create the lock file if it does not exist. if it cannot
-    # be locked, error out here
-    if (-e $lockfile) {
-        $lock_fh = _open ($lockfile, '>' );
-        unless (_flock( $lock_fh, LOCK_EX) ) {
-            die "cannot open, unable to open lock file '$lockfile' to open store: $! $@";
-        }
-    } else {
-        $lock_fh = _open ($lockfile, '>' );
-        unless ($lock_fh = _open ($lockfile, '>' )) {
-            die "cannot open, unable to open lock file '$lockfile' to open store: $! $@";
-        }
-        $lock_fh->autoflush(1);
-        unless (_flock( $lock_fh, LOCK_EX) ) {
-            die "cannot open, unable to open lock file '$lockfile' to open store: $! $@";
-        }
-        print $lock_fh "LOCK";
+    my $locker = $args{locker};
+
+    unless ($locker) {
+        my $lockfile = "$dir/LOCK";
+        my $lockdir = "$dir/LOCKS";
+        $locker = Yote::Locker->new( $lockfile, $lockdir );
     }
 
+    
     my $vers_file = "$dir/VERSION";
     if( -e $vers_file ) {
         my $vers_fh = _open ($vers_file, '<' );
@@ -208,7 +191,6 @@ sub open_store {
 
     my $store = bless [
         $dir,                                   
-        undef,
         $max_file_size,
         $min_silo_id,
         $index_silo,
@@ -216,23 +198,17 @@ sub open_store {
         $transaction_index_silo,
         undef,  # 7
         $header_size, # the ILL from ILLa*
-        $lock_fh,
-        $lockfile,
         $max_silo_id,
-        undef,
+        $locker,
         {%args},
     ], $pkg;
 
     $store->load_active_silos;
-    $store->[IS_LOCKED] = 1;
 
     $store->_fix_transactions;
     $store->_vacuum;
 
-    $store->[IS_LOCKED] = 0;
-    unless (_flock( $lock_fh, LOCK_UN )) {
-        _err( 'open_store', 'unable to unlock the recordstore' );
-    }
+    $locker->unlock;
 
     return $store;
 } #open_store
@@ -252,8 +228,7 @@ returns true if this recordstore is currntly locked.
 
 =cut
 sub is_locked {
-    my $self = shift;
-    return $self->[IS_LOCKED];
+    shift->[LOCKER]->is_locked;;
 }
 
 =item lock
@@ -263,26 +238,9 @@ lock this recordstore.
 =cut
 sub lock {
     my $self = shift;
-
-    return 1 if $self->[IS_LOCKED];
-
-    my $lock_fh = _openhandle( $self->[LOCK_FH]);
-    unless ($lock_fh) {
-        unless ($lock_fh = _open ( $self->[LOCK_FILE], '>' )) {
-            die "unable to lock: lock file $self->[LOCK_FILE] : $@ $!";
-        }
-    }
-    $lock_fh->blocking( 1 );
-    $self->_log( "$$ try to lock" );
-    unless (_flock( $lock_fh, LOCK_EX )) {
-        die "unable to lock: cannot open lock file '$self->[LOCK_FILE]' to open store: $! $@";
-    }
-    $self->_log( "$$ locked" );
-    $self->[LOCK_FH] = $lock_fh;
-    $self->[IS_LOCKED] = 1;
-
-    $self->_reset;
-    return 1;
+    my $ret = $self->[LOCKER]->lock;
+    $ret && $self->_reset;
+    $ret;
 }
 
 =item unlock
@@ -293,7 +251,7 @@ unlock this recordstore.
 sub unlock {
     my $self = shift;
 
-    unless ($self->[IS_LOCKED]) {
+    unless ($self->[LOCKER]->is_locked) {
         _warn( 'unlock', "store not locked" );
         return 1;
     }
@@ -302,14 +260,7 @@ sub unlock {
         _err( 'unlock', "may not unlock with a pending transaction, either commit it or roll it back" );
     }
 
-    $self->[IS_LOCKED] = 0;
-    $self->_log( "$$ try to unlock" );
-    unless (_flock( $self->[LOCK_FH], LOCK_UN ) ) {
-        _err( "unlock", "unable to unlock $@ $!" );
-    }
-    $self->[LOCK_FH] && $self->[LOCK_FH]->close;
-    undef $self->[LOCK_FH];
-    $self->_log( "$$ unlocked" );
+    $self->[LOCKER]->unlock;
 }
 
 =item fetch(id)
@@ -320,7 +271,7 @@ Returns the record by id.
 sub fetch {
     my( $self, $id ) = @_;
 
-    unless ($self->[IS_LOCKED]) {
+    unless ($self->[LOCKER]->is_locked) {
         _err( 'fetch', "record store not locked");
     }
 
@@ -341,7 +292,7 @@ Returns update_time,creation_time of the record.
 sub fetch_meta {
     my( $self, $id ) = @_;
 
-    unless ($self->[IS_LOCKED]) {
+    unless ($self->[LOCKER]->is_locked) {
         _err( 'fetch_meta', "record store not locked");
     }
 
@@ -362,7 +313,7 @@ an id, it assigns the next free id to the item.
 sub stow {
     my ($self, $data, $id ) = @_;
 
-    unless ($self->[IS_LOCKED]) {
+    unless ($self->[LOCKER]->is_locked) {
         _err( 'stow', "record store not locked");
     }
 
@@ -382,7 +333,7 @@ creates and returns a new id.
 =cut
 sub next_id {
     my $self = shift;
-    unless ($self->[IS_LOCKED]) {
+    unless ($self->[LOCKER]->is_locked) {
         _err( 'next_id', "record store not locked");
     }
 
@@ -406,7 +357,7 @@ Marks the record by id as dead.
 sub delete_record {
     my( $self, $del_id ) = @_;
 
-    unless ($self->[IS_LOCKED]) {
+    unless ($self->[LOCKER]->is_locked) {
         _err( 'delete_record', "record store not locked");
     }
 
@@ -444,7 +395,7 @@ sub _delete_record {
 sub use_transaction {
     my $self = shift;
 
-    unless ($self->[IS_LOCKED]) {
+    unless ($self->[LOCKER]->is_locked) {
         _err( 'use_transaction', "record store not locked");
     }
 
@@ -464,7 +415,7 @@ sub use_transaction {
 sub commit_transaction {
     my $self = shift;
 
-    unless ($self->[IS_LOCKED]) {
+    unless ($self->[LOCKER]->is_locked) {
         _err( 'commit_transaction', "record store not locked");
     }
 
@@ -486,7 +437,7 @@ sub commit_transaction {
 sub rollback_transaction {
     my $self = shift;
 
-    unless ($self->[IS_LOCKED]) {
+    unless ($self->[LOCKER]->is_locked) {
         _err( 'rollback_transaction', "record store not locked");
     }
 
@@ -534,7 +485,7 @@ Returns the sum of entry counts (live or dead) for all silos.
 sub silos_entry_count {
     my $self = shift;
 
-    unless ($self->[IS_LOCKED]) {
+    unless ($self->[LOCKER]->is_locked) {
         _err( 'silos_entry_count', "record store not locked");
     }
 
@@ -555,7 +506,7 @@ Returns the number of all records, active or dead.
 sub record_count {
     my $self = shift;
 
-    unless ($self->[IS_LOCKED]) {
+    unless ($self->[LOCKER]->is_locked) {
         _err( 'record_count', "record store not locked");
     }
 
@@ -572,7 +523,7 @@ placements.
 sub active_entry_count {
     my $self = shift;
 
-    unless ($self->[IS_LOCKED]) {
+    unless ($self->[LOCKER]->is_locked) {
         _err( 'active_entry_count', "record store not locked");
     }
 
@@ -618,21 +569,6 @@ sub _warn {
     warn __PACKAGE__."::$method $txt";
 }
 
-sub _open {
-    my ($file, $mode) = @_;
-    my $fh;
-    my $res = CORE::open ($fh, $mode, $file);
-    if ($res) {
-        $fh->blocking( 1 );
-        return $fh;
-    }
-}
-
-sub _flock {
-    my ($fh, $flags) = @_;
-    return $fh && flock($fh,$flags);
-}
-
 sub _log {
     my ($self, $logstr) = @_;
     return if $self->[ARGS]{nolog};
@@ -641,6 +577,16 @@ sub _log {
     `touch $logfile`;
     open my $fh, '>>', $logfile;
     print $fh $logstr."\n";
+}
+
+sub _open {
+    my ($file, $mode) = @_;
+    my $fh;
+    my $res = CORE::open ($fh, $mode, $file);
+    if ($res) {
+        $fh->blocking( 1 );
+        return $fh;
+    }
 }
 
 sub _stow {
@@ -721,10 +667,6 @@ sub _fetch {
     }
     return undef;
 } #fetch
-
-sub _openhandle {
-    return openhandle( shift );
-}
 
 sub _mark {
     my ($self, $silo_id, $id_in_silo, $rs ) = @_;
@@ -894,13 +836,6 @@ sub _fix_transactions {
 
 } #_fix_transactions
 
-sub DESTROY {
-    my $self = shift;
-    my $fh = $self->[LOCK_FH];
-    if ($fh) {
-        close $fh;
-    }
-}
 
 "I became Iggy because I had a sadistic boss at a record store. I'd been in a band called the Iguanas. And when this boss wanted to embarrass and demean me, he'd say, 'Iggy, get me a coffee, light.' - Iggy Pop";
 
