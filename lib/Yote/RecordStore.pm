@@ -122,7 +122,9 @@ Constructs a data store according to the options.
 =cut
 
 sub open_store {
-    my( $pkg, %args ) = @_;
+    my( $pkg, @args ) = @_;
+
+    my %args = @args == 1 ? ( directory => $args[0] ) : @args;
 
     my $dir  = $args{directory};
     my $locker = $args{locker};

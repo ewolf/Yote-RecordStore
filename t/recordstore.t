@@ -288,7 +288,9 @@ sub test_cleanup {
     {
         # test a transaction that gets to the marked completed stage, but doesn't do the cleanup steps
         # after that
-        my $rs = open_store();
+        my $dir = tempdir( CLEANUP => 1 );
+        # test one argument open store
+        my $rs = Yote::RecordStore->open_store( $dir );
 
         my $silo = $rs->get_silo(1);
         my $bsilo = $rs->get_silo(2);
