@@ -122,7 +122,10 @@ Constructs a data store according to the options.
 =cut
 
 sub open_store {
-    my( $pkg, $dir, %args ) = @_;
+    my( $pkg, %args ) = @_;
+
+    my $dir  = $args{directory};
+    my $locker = $args{locker};
 
     unless( -d $dir ) {
         _make_path( $dir, \my $err, 'base' );
@@ -140,15 +143,11 @@ sub open_store {
 #print STDERR "SILOS FROM $min_silo_id ... $max_silo_id\n";
     my $silo_dir  = "$dir/data_silos";
 
-    my $locker = $args{locker};
-
     unless ($locker) {
         my $lockfile = "$dir/LOCK";
-        my $lockdir = "$dir/LOCKS";
-        $locker = Yote::Locker->new( $lockfile, $lockdir );
+        $locker = Yote::Locker->new( $lockfile );
     }
 
-    
     my $vers_file = "$dir/VERSION";
     if( -e $vers_file ) {
         my $vers_fh = _open ($vers_file, '<' );
@@ -228,7 +227,7 @@ returns true if this recordstore is currntly locked.
 
 =cut
 sub is_locked {
-    shift->[LOCKER]->is_locked;;
+    shift->[LOCKER]->is_locked;
 }
 
 =item lock
