@@ -301,7 +301,7 @@ sub fetch_meta {
         return undef;
     }
 
-    my( $silo_id, $id_in_silo, $update_time, $creation_time ) = @{$self->[INDEX_SILO]->get_record($id)};
+    my( $silo_id, $idx_in_silo, $update_time, $creation_time ) = @{$self->[INDEX_SILO]->get_record($id)};
     return $update_time, $creation_time;
 } #fetch_meta
 
@@ -376,15 +376,15 @@ sub _delete_record {
     if( $del_id > $self->[INDEX_SILO]->entry_count ) {
         _err( 'delete_record', "Tried to delete past end of records" );
     }
-    my( $old_silo_id, $old_id_in_silo ) = @{$self->[INDEX_SILO]->get_record($del_id)};
+    my( $old_silo_id, $old_idx_in_silo ) = @{$self->[INDEX_SILO]->get_record($del_id)};
     my $t = _time();
 
-    $self->_log( "$$ DELETE \%$del_id from $old_id_in_silo/$old_silo_id $t" );
+    $self->_log( "$$ DELETE \%$del_id from $old_idx_in_silo/$old_silo_id $t" );
 
     $self->[INDEX_SILO]->put_record( $del_id, [0,0,$t,$t] );
 
     if( $old_silo_id ) {
-        $self->_mark( $old_silo_id, $old_id_in_silo, RS_DEAD );
+        $self->_mark( $old_silo_id, $old_idx_in_silo, RS_DEAD );
     }
 } #_delete_record
 
@@ -601,9 +601,9 @@ sub _stow {
 
     $index->ensure_entry_count( $id );
 
-    my( $old_silo_id, $old_id_in_silo, $old_creation_time );
+    my( $old_silo_id, $old_idx_in_silo, $old_creation_time );
     if( $id > 0 ) {
-       ( $old_silo_id, $old_id_in_silo, undef, $old_creation_time ) = @{$index->get_record($id)};
+       ( $old_silo_id, $old_idx_in_silo, undef, $old_creation_time ) = @{$index->get_record($id)};
     }
     else {
         $id = $index->next_id;
@@ -614,13 +614,23 @@ sub _stow {
 
     my $new_silo = $self->get_silo($new_silo_id);
 
-    my $new_id_in_silo = $new_silo->push( [$rs_override || RS_ACTIVE, $id, $data_write_size, $data] );
+    if (defined $old_silo_id && $new_silo_id == $old_silo_id) {
+        my $t = _time();
+        # new silo same as the old silo
+        $new_silo->put_record( $old_idx_in_silo, [ $rs_override || RS_ACTIVE, $id, $data_write_size, $data ] );
+        $index->put_record( $id, [$new_silo_id,$old_idx_in_silo, $t, $old_creation_time ? $old_creation_time : $t] );
+        $self->_log( "$$ STOW \%$id ($data_write_size bytes) to $old_idx_in_silo/$new_silo_id $t" );
+        return $old_silo_id;
+    }
+
+    my $new_idx_in_silo = $new_silo->push( [$rs_override || RS_ACTIVE, $id, $data_write_size, $data] );
 
     my $t = _time();
 
-    $self->_log( "$$ STOW \%$id ($data_write_size bytes) to $new_id_in_silo/$new_silo_id $t" );
+    $index->put_record( $id, [$new_silo_id,$new_idx_in_silo, $t, $old_creation_time ? $old_creation_time : $t] );
 
-    $index->put_record( $id, [$new_silo_id,$new_id_in_silo, $t, $old_creation_time ? $old_creation_time : $t] );
+    $self->_log( "$$ STOW \%$id ($data_write_size bytes) to $new_idx_in_silo/$new_silo_id $t" );
+
 
     if( $old_silo_id ) {
 #
@@ -645,8 +655,8 @@ sub _stow {
 # ';
 # Yote::RecordStore::Silo::put_record index 21 out of bounds for silo /tmp/jYvDQU4HgS/data_silos/14. Silo has entry count of 20 at lib/Yote/RecordStore/Silo.pm line 34.
 #
-        $self->_log( "$$ mark dead $old_id_in_silo/$old_silo_id" );
-        $self->_mark( $old_silo_id, $old_id_in_silo, RS_DEAD );
+        $self->_log( "$$ mark dead $old_idx_in_silo/$old_silo_id" );
+        $self->_mark( $old_silo_id, $old_idx_in_silo, RS_DEAD );
     }
 
     return $id;
@@ -658,20 +668,20 @@ sub _fetch {
     if( $id > $self->record_count ) {
         return undef;
     }
-    my( $silo_id, $id_in_silo, $update_time, $creation_time ) = @{$self->[INDEX_SILO]->get_record($id)};
+    my( $silo_id, $idx_in_silo, $update_time, $creation_time ) = @{$self->[INDEX_SILO]->get_record($id)};
     if( $silo_id ) {
-        my $ret = $self->get_silo($silo_id)->get_record( $id_in_silo );
+        my $ret = $self->get_silo($silo_id)->get_record( $idx_in_silo );
         my $val = substr( $ret->[3], 0, $ret->[2] );
         my $data_read_size = do { use bytes; length $val };
-        $self->_log( "$$ FETCH \%$id at ($id_in_silo/$silo_id), ".length($data_read_size)." bytes" );
+        $self->_log( "$$ FETCH \%$id at ($idx_in_silo/$silo_id), ".length($data_read_size)." bytes" );
         return $update_time, $creation_time, $val;
     }
     return undef;
 } #fetch
 
 sub _mark {
-    my ($self, $silo_id, $id_in_silo, $rs ) = @_;
-    $self->get_silo($silo_id)->put_record( $id_in_silo, [ $rs ], 'I' );
+    my ($self, $silo_id, $idx_in_silo, $rs ) = @_;
+    $self->get_silo($silo_id)->put_record( $idx_in_silo, [ $rs ], 'I' );
 }
 
 sub _time {
